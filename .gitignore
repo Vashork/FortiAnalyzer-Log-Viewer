@@ -1,0 +1,152 @@
+# ==============================
+# 🔒 Секреты и локальная конфигурация
+# ==============================
+.env
+
+
+# ==============================
+# 🧠 IDE и редакторы (PyCharm, IntelliJ, VS Code и др.)
+# ==============================
+
+# IntelliJ / PyCharm
+.idea/
+*.iml
+
+# Visual Studio Code
+.vscode/
+
+# Редакторы (Vim, Emacs и др.)
+*.swp
+*.swo
+
+
+
+# ==============================
+# 🐍 Python: кэш, байт-код, временные файлы
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# ==============================
+# 🏗️ Виртуальные окружения и зависимости
+# ==============================
+
+# Стандартные имена venv
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# Виртуальное окружение в корне проекта (Windows, если создано через `python -m venv .`)
+Lib/
+Scripts/
+
+# pyenv
+.python-version
+
+# pipenv (Pipfile.lock обычно коммитят, поэтому исключён)
+# Pipfile.lock
+
+# Локальные egg-пакеты и сборки
+*.egg-info/
+.installed.cfg
+*.egg
+
+
+# ==============================
+# 📦 Сборка, упаковка, дистрибуция
+# ==============================
+
+build/
+dist/
+*.spec
+*.manifest
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
+wheels/
+downloads/
+eggs/
+.eggs/
+develop-eggs/
+sdist/
+var/
+parts/
+target/
+
+
+# ==============================
+# 🧪 Тестирование и покрытие кода
+# ==============================
+
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+
+# ==============================
+# 📁 Проектные артефакты и вывод
+# ==============================
+
+# Результаты работы falogviewer
+results*.txt
+output*.txt
+*.log
+
+# Примеры данных (если генерируете JSON/CSV для отладки)
+example_json/
+*.json
+*.csv
+*.out
+
+
+# ==============================
+# 🌐 Веб-фреймворки и инструменты (на всякий случай)
+# ==============================
+
+# Django
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Sphinx docs
+docs/_build/
+
+# mkdocs
+/site
+
+
+# ==============================
+# 🖥️ Системные и ОС-специфичные файлы
+# ==============================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Linux
+*~

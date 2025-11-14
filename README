@@ -1,0 +1,8 @@
+# Только исходящий трафик
+python main.py machines.txt --hours 6 --direction outbound
+
+# Только входящий
+python main.py machines.txt --hours 6 --direction inbound
+
+# Оба направления (по умолчанию)
+python main.py machines.txt --hours 6
