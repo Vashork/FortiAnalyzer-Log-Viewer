@@ -1,8 +1,93 @@
-# Только исходящий трафик
-python main.py machines.txt --hours 6 --direction outbound
+# FortiAnalyzer Log Viewer
 
-# Только входящий
-python main.py machines.txt --hours 6 --direction inbound
+### 1.Быстрый старт
 
-# Оба направления (по умолчанию)
+# Клонируйте репозиторий (если ещё не сделали)
+git clone <ваш-репозиторий>
+cd falogviewer
+
+# Создайте виртуальное окружение (рекомендуется)
+python -m venv .venv
+source .venv/bin/activate      # Linux/macOS
+# или
+.venv\Scripts\activate         # Windows
+
+# Установите зависимости
+pip install -r requirements.txt
+
+### 2. Настройте подключение к FortiAnalyzer
+Создайте файл .env в корне проекта из шаблона .env.example
+
+### 3. Запустите анализ
+# Простой запуск из файла за последние 6 часов
 python main.py machines.txt --hours 6
+
+# Анализ всей сети по VLAN (имя или ID)
+python main.py --vlan SecVlan --days 1
+
+# CIDR-сеть + параллельная обработка
+python main.py 10.20.0.0/16 --workers 4 --direction outbound
+
+Результаты появятся в папке results/ — каждая машина в отдельном файле.
+
+Примеры файлов
+machines.txt
+10.20.7.93
+10.20.8.88
+orion.diasoft.ru
+192.168.1.10-192.168.1.20
+
+vlans.txt (создайте, если используете --vlan)
+# Сеть        VLAN_ID   Имя
+192.168.0.0/24  2014     SecVlan
+10.20.0.0/16    100      Internal
+
+⚙️ Основные параметры командной строки
+Анализ за 12 часов
+python main.py machines.txt --hours 12
+Анализ за 2 дня
+python main.py machines.txt --days 2
+Только входящий трафик ( по отношению к IP из machines.txt )
+--direction inbound
+Только исходящий трафик ( по отношению к IP из machines.txt )
+--direction outbound
+Параллельно 4 машины
+--workers 4
+Поиск по VLAN
+--vlan SecVlan
+или
+--vlan 2014
+Точный период
+--start 2025-11-10T08:00:00 --end 2025-11-10T18:00:00
+Исключить IP
+--exclude internal_ips.txt
+
+📁 Структура проекта
+falogviewer/
+├── main.py              # Точкой входа приложения
+├── .env.example         # Шаблон конфигурационного файла
+├── .gitignore           # Исключения из Git-репозитория
+├── machines.txt         # Список целей (опционально)
+├── vlans.txt            # Справочник VLAN (опционально)
+├── requirements.txt     # Справочник зависимости
+├── config.py            # Загрузка и централизованное управление конфигурацией
+├── results/             # Сюда сохраняются результаты
+├── analyzer/            # Модули, отвечающие за анализ сетевого трафика
+├── client/              # Реализует взаимодействие с внешним API
+└── utils/               # вспомогательные утилиты: парсинг CIDR и диапазонов IP, работа с конфигурационными файлами (например, .env)
+
+
+🔒 Безопасность
+.env добавлен в .gitignore — убедитесь, что он не попал в историю Git.
+Если .env был закоммичен — немедленно смените пароль в FortiAnalyzer.
+
+🛠 Требования
+Python 3.7+
+Доступ к FortiAnalyzer v7.6.3 через JSON-RPC API
+Сетевое подключение для DNS
+
+💡 Советы по производительности
+Увеличьте BATCH_SIZE до 500 или 1000 в .env → меньше HTTP-запросов.
+Используйте --workers 2-4 → обработка нескольких машин параллельно.
+Сужайте временной диапазон → --hours 1 вместо 24, если ищете свежие события.
+Используйте VLAN-режим → не вводите вручную сотни IP.
