@@ -2,12 +2,13 @@ from collections import defaultdict
 from typing import Dict, List
 
 from utils.network import resolve_hostname
+from config import COLUMNS_CONFIG, SMART_ACTION, FILTER_MODE
 
 
 def proto_to_name(proto_id) -> str:
     try:
         return {6: "tcp", 17: "udp", 1: "icmp"}.get(int(proto_id), str(proto_id))
-    except:
+    except Exception:
         return "unknown"
 
 
@@ -28,7 +29,21 @@ class LogAnalyzer:
             remote_field = "dstip"
             port_field = "dstport"
 
-        result = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        # result[local_ip][(remote, port, proto)] = {...}
+        result = defaultdict(
+            lambda: defaultdict(
+                lambda: {
+                    "count": 0,
+                    "actions": set(),
+                    "policyids": set(),
+                    "apps": set(),
+                    "srcintfs": set(),
+                    "dstintfs": set(),
+                    "policynames": set(),
+                    "devnames": set(),
+                }
+            )
+        )
 
         for log in logs:
             local_ip = log.get(local_field)
@@ -44,7 +59,37 @@ class LogAnalyzer:
                 continue
 
             key = (remote_ip, port, proto)
-            result[local_ip][key]["count"] += 1
+            entry = result[local_ip][key]
+            entry["count"] += 1
+
+            # Дополнительные поля для колонок
+            action = log.get("action")
+            if action:
+                entry["actions"].add(action)
+
+            policyid = log.get("policyid")
+            if policyid is not None:
+                entry["policyids"].add(str(policyid))
+
+            app = log.get("app")
+            if app:
+                entry["apps"].add(app)
+
+            srcintf = log.get("srcintf")
+            if srcintf:
+                entry["srcintfs"].add(srcintf)
+
+            dstintf = log.get("dstintf")
+            if dstintf:
+                entry["dstintfs"].add(dstintf)
+
+            policyname = log.get("policyname")
+            if policyname:
+                entry["policynames"].add(policyname)
+
+            devname = log.get("devname")
+            if devname:
+                entry["devnames"].add(devname)
 
         return result
 
@@ -52,21 +97,57 @@ class LogAnalyzer:
         """Generate text reports for inbound/outbound traffic per target IP."""
         reports = {}
 
+        # Подготовим список доп. колонок на основе COLUMNS_CONFIG
+        extra_columns = []
+        if COLUMNS_CONFIG.get("action"):
+            extra_columns.append(("Action", "actions"))
+        if COLUMNS_CONFIG.get("policyid"):
+            extra_columns.append(("PolicyID", "policyids"))
+        if COLUMNS_CONFIG.get("app"):
+            extra_columns.append(("App", "apps"))
+        if COLUMNS_CONFIG.get("srcintf"):
+            extra_columns.append(("SrcIntf", "srcintfs"))
+        if COLUMNS_CONFIG.get("dstintf"):
+            extra_columns.append(("DstIntf", "dstintfs"))
+        if COLUMNS_CONFIG.get("policyname"):
+            extra_columns.append(("PolicyName", "policynames"))
+        if COLUMNS_CONFIG.get("devname"):
+            extra_columns.append(("DevName", "devnames"))
+
         for local_ip, entries in stats.items():
             lines = []
 
-            header = (
-                f"{'=' * 110}\n"
-                f"{direction.upper()} TRAFFIC for local IP: {local_ip}\n"
-                f"{'=' * 110}\n\n"
-                f"{'Remote IP':<15}  {'Hostname':<30}  {'Port':<6}  {'Proto':<5}  {'Connections'}\n"
-                f"{'-' * 110}"
+            # Заголовок
+            header = [
+                "=" * 110,
+                f"{direction.upper()} TRAFFIC for local IP: {local_ip}",
+                "=" * 110,
+                "",
+                ]
+
+            # Базовая шапка таблицы
+            base_header = (
+                f"{'Remote IP':<15}  "
+                f"{'Hostname':<30}  "
+                f"{'Port':<6}  "
+                f"{'Proto':<5}  "
+                f"{'Connections':<11}"
             )
-            lines.append(header)
+
+            # Добавляем доп. колонки в шапку
+            for col_name, _ in extra_columns:
+                base_header += f"  {col_name:<15}"
+
+            separator = "-" * min(len(base_header), 140)
+
+            header.append(base_header)
+            header.append(separator)
+            lines.extend(header)
 
             total_conns = 0
             unique_ips = set()
 
+            # Сортируем по убыванию count
             for (remote, port, proto), d in sorted(
                     entries.items(), key=lambda x: -x[1]["count"]
             ):
@@ -74,9 +155,25 @@ class LogAnalyzer:
                 total_conns += count
                 unique_ips.add(remote)
                 hostname = resolve_hostname(remote)
-                lines.append(
-                    f"{remote:<15}  {hostname:<30}  {port:<6}  {proto:<5}  {count}"
+
+                line = (
+                    f"{remote:<15}  "
+                    f"{hostname:<30}  "
+                    f"{port:<6}  "
+                    f"{proto:<5}  "
+                    f"{count:<11}"
                 )
+
+                # Доп. колонки — join множеств через запятую
+                for _, key in extra_columns:
+                    values = d.get(key) or set()
+                    if values:
+                        cell = ",".join(sorted(values))
+                    else:
+                        cell = "-"
+                    line += f"  {cell:<15}"
+
+                lines.append(line)
 
             lines.append("")
             lines.append(f"Total unique remotes: {len(unique_ips)}")
@@ -92,21 +189,54 @@ def build_faz_filter(direction: str, target_ips: List[str]) -> str:
     Builds a FortiAnalyzer-compatible filter:
       - For 1 IP:  srcip = "A.B.C.D"
       - For many:  srcip in ["A","B","C"]
-    """
 
+    Здесь же, если FILTER_MODE=FAZ и SMART_ACTION != all,
+    добавляем фильтр по полю action.
+    """
     if direction == "inbound":
         field = "dstip"
     else:
         field = "srcip"
 
-    # Одиночный IP — всегда = "ip"
+    # Базовый IP-фильтр
     if len(target_ips) == 1:
         ip = target_ips[0]
-        return f'({field} = "{ip}")'
+        base_filter = f'({field} = "{ip}")'
+    else:
+        quoted = ",".join(f'"{ip}"' for ip in target_ips)
+        base_filter = f"({field} in [{quoted}])"
 
-    # Несколько IP — список
-    quoted = ",".join(f'"{ip}"' for ip in target_ips)
-    return f'({field} in [{quoted}])'
+    # Smart-фильтрация на стороне FAZ
+    if FILTER_MODE == "faz":
+        action_part = None
+        if SMART_ACTION == "deny":
+            action_part = '(action="deny")'
+        elif SMART_ACTION == "all-accept":
+            action_part = '(action="accept")'
+
+        if action_part:
+            return f"{base_filter} and {action_part}"
+
+    # Иначе — только IP
+    return base_filter
+
+
+def _filter_logs_by_smart_action(logs, smart_action: str):
+    """Локальная фильтрация логов по полю action (если FILTER_MODE=LOCAL)."""
+    if smart_action == "all":
+        return logs
+
+    target_action = None
+    if smart_action == "deny":
+        target_action = "deny"
+    elif smart_action == "all-accept":
+        target_action = "accept"
+
+    if not target_action:
+        return logs
+
+    filtered = [log for log in logs if log.get("action") == target_action]
+    return filtered
 
 
 def analyze_logs(
@@ -125,6 +255,7 @@ def analyze_logs(
 
     print(f"🔎 FILTER: {filter_str}")
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
+    print(f"⚙️ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
     # 2. Create search task
     task_id = client.create_search_task(filter_str, start_time, end_time)
@@ -148,7 +279,18 @@ def analyze_logs(
         print("⚠️ No logs retrieved from FAZ.")
         return {}
 
-    print(f"📊 Analyzing {len(logs)} logs")
+    print(f"📊 Retrieved {len(logs)} raw logs")
+
+    # 4.1. Локальная фильтрация по action, если выбрано FILTER_MODE=LOCAL
+    if FILTER_MODE == "local":
+        before = len(logs)
+        logs = _filter_logs_by_smart_action(logs, SMART_ACTION)
+        print(f"🔧 Local smart_action='{SMART_ACTION}': {before} → {len(logs)} logs")
+        if not logs:
+            print("⚠️ No logs left after local smart_action filter.")
+            return {}
+
+    print(f"📊 Analyzing {len(logs)} logs after filtering")
 
     analyzer = LogAnalyzer(exclude_ips)
     stats = analyzer.aggregate_by_local(logs, direction, target_ips)
