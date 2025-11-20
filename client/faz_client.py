@@ -5,6 +5,8 @@ from typing import Optional, List, Dict, Tuple
 import requests
 import urllib3
 
+from config import EMPTY_BATCH_LIMIT
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -215,7 +217,7 @@ class FortiAnalyzerClient:
         seen_keys = set()
 
         offset = 0
-        max_empty_batches = 5
+        max_empty_batches = EMPTY_BATCH_LIMIT
         empty_batches = 0
 
         # "Безопасный лимит" на случай, если matched-logs врет
@@ -250,10 +252,10 @@ class FortiAnalyzerClient:
                 result = self._post(payload, timeout=60)
                 raw = result.get("result", {})
                 data = raw.get("data") or []
-
             except Exception as e:
                 print(f"✗ Error fetching logs at offset {offset}: {e}")
                 empty_batches += 1
+                offset += batch_size  # двигаем offset даже при ошибках
                 if empty_batches >= max_empty_batches:
                     print("⚠️ Too many consecutive errors, stopping fetch.")
                     break
@@ -263,6 +265,7 @@ class FortiAnalyzerClient:
             # Пустой батч
             if not data:
                 empty_batches += 1
+                offset += batch_size  # важно: не застревать на одном offset
                 if empty_batches >= max_empty_batches:
                     print("⚠️ No data returned for several attempts, stopping fetch.")
                     break
@@ -271,6 +274,7 @@ class FortiAnalyzerClient:
 
             # получили непустой батч — сбрасываем счётчик пустых
             empty_batches = 0
+            offset += batch_size
 
             for log in data:
                 key = self._build_log_key(log)
@@ -278,9 +282,6 @@ class FortiAnalyzerClient:
                     continue
                 seen_keys.add(key)
                 all_logs.append(log)
-
-            # как в рабочей версии — двигаем offset "страницами"
-            offset += batch_size
 
             # Условие остановки №1: собрали хотя бы заявленное число и текущий батч меньше лимита
             if len(all_logs) >= total_logs and len(data) < batch_size:

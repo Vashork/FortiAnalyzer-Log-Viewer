@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from utils.network import resolve_hostname
 from config import COLUMNS_CONFIG, SMART_ACTION, FILTER_MODE
@@ -114,6 +114,8 @@ class LogAnalyzer:
         if COLUMNS_CONFIG.get("devname"):
             extra_columns.append(("DevName", "devnames"))
 
+        show_connections = COLUMNS_CONFIG.get("connections", True)
+
         for local_ip, entries in stats.items():
             lines = []
 
@@ -125,18 +127,22 @@ class LogAnalyzer:
                 "",
                 ]
 
-            # Базовая шапка таблицы
-            base_header = (
-                f"{'Remote IP':<15}  "
-                f"{'Hostname':<30}  "
-                f"{'Port':<6}  "
-                f"{'Proto':<5}  "
-                f"{'Connections':<11}"
-            )
+            # Описание колонок с динамической сборкой
+            columns = [
+                ("Remote IP", 15),
+                ("Hostname", 30),
+                ("Port", 6),
+                ("Proto", 5),
+            ]
+            if show_connections:
+                columns.append(("Connections", 11))
 
-            # Добавляем доп. колонки в шапку
             for col_name, _ in extra_columns:
-                base_header += f"  {col_name:<15}"
+                columns.append((col_name, 15))
+
+            base_header = ""
+            for name, width in columns:
+                base_header += f"{name:<{width}}  "
 
             separator = "-" * min(len(base_header), 140)
 
@@ -156,13 +162,19 @@ class LogAnalyzer:
                 unique_ips.add(remote)
                 hostname = resolve_hostname(remote)
 
-                line = (
-                    f"{remote:<15}  "
-                    f"{hostname:<30}  "
-                    f"{port:<6}  "
-                    f"{proto:<5}  "
-                    f"{count:<11}"
-                )
+                row_parts = [
+                    (remote, 15),
+                    (hostname, 30),
+                    (port, 6),
+                    (proto, 5),
+                ]
+
+                if show_connections:
+                    row_parts.append((str(count), 11))
+
+                line = ""
+                for value, width in row_parts:
+                    line += f"{value:<{width}}  "
 
                 # Доп. колонки — join множеств через запятую
                 for _, key in extra_columns:
@@ -171,7 +183,7 @@ class LogAnalyzer:
                         cell = ",".join(sorted(values))
                     else:
                         cell = "-"
-                    line += f"  {cell:<15}"
+                    line += f"{cell:<15}  "
 
                 lines.append(line)
 
@@ -184,7 +196,11 @@ class LogAnalyzer:
         return reports
 
 
-def build_faz_filter(direction: str, target_ips: List[str]) -> str:
+def build_faz_filter(
+        direction: str,
+        target_ips: List[str],
+        ports: Optional[List[str]] = None,
+) -> str:
     """
     Builds a FortiAnalyzer-compatible filter:
       - For 1 IP:  srcip = "A.B.C.D"
@@ -192,7 +208,12 @@ def build_faz_filter(direction: str, target_ips: List[str]) -> str:
 
     Здесь же, если FILTER_MODE=FAZ и SMART_ACTION != all,
     добавляем фильтр по полю action.
+
+    Дополнительно:
+    - если задан список ports, добавляем:
+        and (dstport="53" or dstport="22" ...)
     """
+
     if direction == "inbound":
         field = "dstip"
     else:
@@ -206,6 +227,8 @@ def build_faz_filter(direction: str, target_ips: List[str]) -> str:
         quoted = ",".join(f'"{ip}"' for ip in target_ips)
         base_filter = f"({field} in [{quoted}])"
 
+    combined = base_filter
+
     # Smart-фильтрация на стороне FAZ
     if FILTER_MODE == "faz":
         action_part = None
@@ -215,10 +238,16 @@ def build_faz_filter(direction: str, target_ips: List[str]) -> str:
             action_part = '(action="accept")'
 
         if action_part:
-            return f"{base_filter} and {action_part}"
+            combined = f"{combined} and {action_part}"
 
-    # Иначе — только IP
-    return base_filter
+    # Фильтр по dstport из списка портов
+    if ports:
+        port_exprs = [f'(dstport="{p}")' for p in ports]
+        ports_str = " or ".join(port_exprs)
+        ports_filter = f"({ports_str})"
+        combined = f"{combined} and {ports_filter}"
+
+    return combined
 
 
 def _filter_logs_by_smart_action(logs, smart_action: str):
@@ -247,15 +276,20 @@ def analyze_logs(
         end_time,
         exclude_ips,
         batch_size=100,
+        ports: Optional[List[str]] = None,
 ):
     """Full FAZ log analysis pipeline."""
 
     # 1. Build correct FortiAnalyzer filter
-    filter_str = build_faz_filter(direction, target_ips)
+    filter_str = build_faz_filter(direction, target_ips, ports)
 
     print(f"🔎 FILTER: {filter_str}")
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
     print(f"⚙️ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
+    if ports:
+        print(f"🎯 PORTS: {', '.join(ports)}")
+    else:
+        print("🎯 PORTS: ALL")
 
     # 2. Create search task
     task_id = client.create_search_task(filter_str, start_time, end_time)

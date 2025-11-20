@@ -20,6 +20,9 @@ def resolve_hostname(ip: str) -> str:
     return hostname
 
 
+# -----------------------------
+#  CIDR / Ranges
+# -----------------------------
 def parse_ip_range(spec: str) -> List[str]:
     """Преобразует CIDR или диапазон в список IP-адресов."""
     spec = spec.strip()
@@ -51,6 +54,9 @@ def ip_in_cidr_or_range(ip_str: str, spec: str) -> bool:
         return ip_str == spec
 
 
+# -----------------------------
+#  VLAN helpers
+# -----------------------------
 def normalize_vlan_key(s: str) -> str:
     return s.strip().lower()
 
@@ -70,13 +76,16 @@ def load_vlans(path: str) -> List[Tuple[str, str, str]]:
                     vlan_name = " ".join(parts[2:])
                     vlans.append((cidr_or_range, vlan_id, vlan_name))
     except FileNotFoundError:
-        # Обрабатывается в main.py
         pass
     return vlans
 
 
+# -----------------------------
+#  Targets loader
+# -----------------------------
 def load_machines(path: str) -> List[str]:
-    """Загружает список целей из файла.
+    """
+    Загружает список целей из файла.
 
     Поддерживает:
       - одиночные IP-адреса
@@ -85,6 +94,7 @@ def load_machines(path: str) -> List[str]:
       - hostnames (orion.diasoft.ru) — резолвятся в IPv4-адрес
     """
     ips: List[str] = []
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             for raw in f:
@@ -109,13 +119,54 @@ def load_machines(path: str) -> List[str]:
                 except ipaddress.AddressValueError:
                     pass
 
-                # Похоже на hostname — резолвим
+                # Если не IP — пытаемся как hostname
                 try:
                     resolved_ip = socket.gethostbyname(line)
                     ips.append(resolved_ip)
                 except socket.gaierror:
                     print(f"⚠️ Cannot resolve hostname in machines file: {line}")
+
     except FileNotFoundError:
         return []
 
     return ips
+
+
+# -----------------------------
+#  Ports loader for --proto
+# -----------------------------
+def load_ports(path: str) -> List[str]:
+    """
+    Загружает список портов из файла (по умолчанию ports.txt / значение из PORTS_FILE).
+
+    Формат:
+      53
+      22
+      445
+      # комментарии начинаются с #
+      53/tcp   # допустимо, будет взято только число до '/'
+
+    Возвращает список строковых значений портов.
+    """
+    ports: List[str] = []
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # допускаем формат 53/tcp -> берём до '/'
+                if "/" in line:
+                    line = line.split("/", 1)[0].strip()
+
+                if not line.isdigit():
+                    print(f"⚠️ Invalid port value in {path}: {line}")
+                    continue
+
+                ports.append(line)
+    except FileNotFoundError:
+        print(f"⚠️ Ports file not found: {path}")
+
+    return ports

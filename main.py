@@ -18,12 +18,15 @@ from config import (
     FORTIANALYZER_URL,
     FORTIANALYZER_USERNAME,
     FORTIANALYZER_PASSWORD,
+    SMART_ACTION,
+    FILTER_MODE,
 )
 from utils.network import (
     load_machines,
     load_vlans,
     parse_ip_range,
     normalize_vlan_key,
+    load_ports,
 )
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs
@@ -42,14 +45,16 @@ def expand_targets_from_vlans(vlan_query, vlans_map):
     query_norm = normalize_vlan_key(vlan_query)
 
     for cidr_or_range, vlan_id, vlan_name in vlans_map:
-        if query_norm == normalize_vlan_key(str(vlan_id)) or query_norm == normalize_vlan_key(vlan_name):
+        if query_norm == normalize_vlan_key(str(vlan_id)) or query_norm == normalize_vlan_key(
+                vlan_name
+        ):
             ips = parse_ip_range(cidr_or_range)
             targets.extend(ips)
 
     return targets
 
 
-def process_single_direction(ip_list, direction, start_time, end_time, exclude_ips):
+def process_single_direction(ip_list, direction, start_time, end_time, exclude_ips, ports):
     """Обрабатывает список IP — один воркер."""
     results = {}
 
@@ -75,9 +80,10 @@ def process_single_direction(ip_list, direction, start_time, end_time, exclude_i
                 end_time=end_time,
                 exclude_ips=exclude_ips,
                 batch_size=BATCH_SIZE,
+                ports=ports,
             )
 
-            # analyze_logs вернёт {local_ip: text}
+            # analyze_logs вернёт {(local_ip, direction): text}
             results.update(report_dict)
 
     finally:
@@ -92,20 +98,36 @@ def chunk_list(lst, n):
         return [lst]
 
     k, m = divmod(len(lst), n)
-    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+    return [lst[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n)]
 
 
-def append_history(history_path: Path, inbound_text: str, outbound_text: str) -> None:
-    """Добавляет запись в history.txt (корпоративный стиль №2)."""
+def append_history(history_path: Path, inbound_text: str, outbound_text: str, start_time: str, end_time: str, cmd: str) -> None:
+    """
+    Добавляет запись в history.txt.
+
+    Теперь включает:
+      - время запуска (локальное)
+      - команду запуска
+      - временное окно поиска в FAZ
+      - информацию про SMART_ACTION / FILTER_MODE
+    """
     if not inbound_text and not outbound_text:
         return
 
     history_path = Path(history_path)
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Время
+    # Время на стороне клиента
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    header = f"=== FortiAnalyzer Export — {ts} (UTC+3) ==="
+
+    header_lines = [
+        f"=== FortiAnalyzer Export — {ts} (UTC+3) ===",
+        f"Command: {cmd}",
+        f"Time range: {start_time} → {end_time}",
+        f"SMART_ACTION={SMART_ACTION} | FILTER_MODE={FILTER_MODE}",
+        "=========================================================\n",
+    ]
+    header = "\n".join(header_lines)
 
     # Подсчёт количества записей (по количеству строк Remote IP)
     def count_entries(block: str) -> int:
@@ -169,6 +191,12 @@ def main():
 
     parser.add_argument("--workers", type=int, help="Override worker count")
 
+    parser.add_argument(
+        "--proto",
+        action="store_true",
+        help="Filter FAZ logs by dstport list from PORTS_FILE (ports.txt by default)",
+    )
+
     args = parser.parse_args()
 
     validate_config()
@@ -226,6 +254,17 @@ def main():
     workers = max(1, workers)
     print(f"🧵 Using {workers} worker(s)")
 
+    # ---- Ports (for --proto) ----
+    ports = None
+    if args.proto:
+        ports_file = os.getenv("PORTS_FILE", "ports.txt")
+        ports = load_ports(ports_file)
+        if ports:
+            print(f"🎯 Port filter enabled from {ports_file}: {', '.join(ports)}")
+        else:
+            print(f"⚠️ Port filter file '{ports_file}' is empty or missing, ignoring --proto")
+            ports = None
+
     directions = ["inbound", "outbound"] if args.direction == "all" else [args.direction]
 
     # (local_ip, direction) -> text
@@ -248,14 +287,15 @@ def main():
                     start_time,
                     end_time,
                     exclude_ips,
+                    ports,
                 )
                 for chunk in chunks
             ]
 
             for fut in as_completed(futures):
                 batch_results = fut.result()
-                for ip, text in batch_results.items():
-                    final_results[(ip, direc)] = text
+                for key, text in batch_results.items():
+                    final_results[key] = text
 
     # ---- Build combined per direction ----
     inbound_text = "\n\n".join(
@@ -280,11 +320,12 @@ def main():
         if outbound_text:
             combined_parts.append("[OUTBOUND]\n" + outbound_text)
         if combined_parts:
-            save_results("\n\n".join(combined_parts), args.output)
+            save_results("\n\n".join(combined_parts), Path(args.output))
 
     # ---- History ----
     history_path = output_dir / "history.txt"
-    append_history(history_path, inbound_text, outbound_text)
+    cmd = " ".join(sys.argv)
+    append_history(history_path, inbound_text, outbound_text, start_time, end_time, cmd)
 
 
 if __name__ == "__main__":

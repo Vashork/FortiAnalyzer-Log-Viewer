@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta  # сейчас не используется, см. ревью
+from datetime import datetime, timedelta  # сейчас не используется, оставим на будущее
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +18,9 @@ RESULTS_DIR = os.getenv("RESULTS_DIR", "results")
 
 # Performance tuning
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 2))
+
+# Лимит подряд идущих пустых батчей при fetch_logs
+EMPTY_BATCH_LIMIT = int(os.getenv("EMPTY_BATCH_LIMIT", 5))
 
 
 def _get_bool(name: str, default: str = "false") -> bool:
@@ -40,6 +43,10 @@ if FILTER_MODE not in ("faz", "local"):
 
 # Конфигурация колонок для отчёта
 COLUMNS_CONFIG = {
+    # Главная колонка количества соединений
+    "connections": _get_bool("COLUMN_CONNECTIONS", "true"),
+
+    # Дополнительные колонки
     "action": _get_bool("COLUMN_ACTION", "false"),
     "policyid": _get_bool("COLUMN_POLICYID", "false"),
     "app": _get_bool("COLUMN_APP", "false"),
