@@ -13,11 +13,6 @@ from client.faz_client import FortiAnalyzerClient
 
 
 def dump_raw_logs(ip: str, hours: int = 1, limit: int = 50):
-    """
-    Создаёт задачу в FAZ, получает сырые логи (raw JSON)
-    и печатает первые N записей.
-    """
-
     validate_config()
 
     client = FortiAnalyzerClient(
@@ -30,14 +25,12 @@ def dump_raw_logs(ip: str, hours: int = 1, limit: int = 50):
         print("❌ Login failed")
         return
 
-    # Окно времени — как в main.py, только попроще: последние N часов
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(hours=hours)
 
     start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Минимальный фильтр: всё, где srcip или dstip = ip
     filter_str = f'(srcip="{ip}" or dstip="{ip}")'
 
     print(f"🔍 FILTER: {filter_str}")
@@ -74,19 +67,8 @@ def dump_raw_logs(ip: str, hours: int = 1, limit: int = 50):
 def main():
     parser = argparse.ArgumentParser(description="Raw FAZ log dumper")
     parser.add_argument("ip", help="IP-адрес, по которому искать логи")
-    parser.add_argument(
-        "--hours",
-        type=int,
-        default=1,
-        help="За сколько часов назад брать логи (по умолчанию 1)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=20,
-        help="Сколько записей напечатать (по умолчанию 20)",
-    )
-
+    parser.add_argument("--hours", type=int, default=1)
+    parser.add_argument("--limit", type=int, default=20)
     args = parser.parse_args()
     dump_raw_logs(args.ip, hours=args.hours, limit=args.limit)
 

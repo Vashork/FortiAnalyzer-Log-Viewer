@@ -110,13 +110,11 @@ class FortiAnalyzerClient:
             result = self._post(payload)
             raw = result.get("result")
 
-            # --- FORMAT 1: result is dict with tid ---
             if isinstance(raw, dict) and "tid" in raw:
                 tid = raw["tid"]
                 print(f"✓ Created search task with ID: {tid}")
                 return tid
 
-            # --- FORMAT 2: result is array [{ tid, status }]
             if isinstance(raw, list) and raw and "tid" in raw[0]:
                 tid = raw[0]["tid"]
                 print(f"✓ Created search task with ID: {tid}")
@@ -157,22 +155,18 @@ class FortiAnalyzerClient:
                 matched_logs = raw.get("matched-logs", 0)
                 progress = raw.get("progress-percent", 0)
 
-                # Всегда показываем прогресс, включая 0%
                 if progress != last_progress:
                     print(f"Progress: {progress}%")
                     last_progress = progress
 
-                # Успешно завершилось
                 if status_code == 0 and progress == 100:
                     print(f"✓ Task completed successfully. Found {matched_logs} matching logs")
                     return True, matched_logs
 
-                # 0/1 — нормальные состояния, ждём дальше
                 if status_code in (0, 1):
                     time.sleep(5)
                     continue
 
-                # Любой другой код — ошибка
                 print(f"✗ Task failed with status code: {status_code}")
                 return False, 0
 
@@ -184,116 +178,88 @@ class FortiAnalyzerClient:
         return False, 0
 
     # ==========================
-    #  Log Fetch (robust)
+    #  REAL WORKING FETCH LOGS
+    #  (из первой стабильной версии)
     # ==========================
 
-    @staticmethod
-    def _build_log_key(log: Dict) -> Tuple:
-        """
-        Строим "почти уникальный" ключ лога для дедупликации.
-        Не идеально, но сильно снижает дубликаты при странном поведении FAZ.
-        """
-        return (
-            log.get("logid") or log.get("_logid"),
-            log.get("itime") or log.get("time") or log.get("eventtime"),
-            log.get("srcip"),
-            log.get("dstip"),
-            log.get("srcport"),
-            log.get("dstport"),
-            log.get("proto"),
-            log.get("policyid"),
-        )
-
     def fetch_logs(self, task_id: int, total_logs: int, batch_size: int = 100) -> List[Dict]:
-        """
-        Fetch logs in batches, максимально устойчиво к:
-          - неточным matched-logs,
-          - дубликатам,
-          - пустым батчам,
-          - временным ошибкам FAZ.
-        Рабочая версия: url = /logview/adom/root/logsearch/{task_id}, offset += batch_size
-        """
+
         all_logs: List[Dict] = []
-        seen_keys = set()
-
         offset = 0
-        max_empty_batches = EMPTY_BATCH_LIMIT
-        empty_batches = 0
 
-        # "Безопасный лимит" на случай, если matched-logs врет
-        safe_cap = max(total_logs * 2, batch_size * 10)
+        MAX_EMPTY_RETRIES = 10
+        MAX_INCOMPLETE_RETRIES = 3
 
         print(f"📥 Fetching logs (matched={total_logs}, batch={batch_size})...")
 
-        while True:
-            remaining = max(total_logs - len(all_logs), 0)
-            print(
-                f"📡 Requesting logs at offset {offset} "
-                f"(collected={len(all_logs)}/{total_logs}, remaining={remaining})..."
-            )
+        while offset < total_logs:
 
             payload = {
                 "id": "123456789",
                 "jsonrpc": "2.0",
                 "method": "get",
-                "params": [
-                    {
-                        "apiver": 3,
-                        "limit": batch_size,
-                        "offset": offset,
-                        # ВАЖНО: рабочий URL БЕЗ /result/
-                        "url": f"/logview/adom/root/logsearch/{task_id}",
-                    }
-                ],
-                "session": self.session,
+                "params": [{
+                    "apiver": 3,
+                    "limit": batch_size,
+                    "offset": offset,
+                    "url": f"/logview/adom/root/logsearch/{task_id}"
+                }],
+                "session": self.session
             }
 
-            try:
-                result = self._post(payload, timeout=60)
-                raw = result.get("result", {})
-                data = raw.get("data") or []
-            except Exception as e:
-                print(f"✗ Error fetching logs at offset {offset}: {e}")
-                empty_batches += 1
-                offset += batch_size  # двигаем offset даже при ошибках
-                if empty_batches >= max_empty_batches:
-                    print("⚠️ Too many consecutive errors, stopping fetch.")
-                    break
-                time.sleep(3)
-                continue
+            empty_retry = 0
+            incomplete_retry = 0
 
-            # Пустой батч
-            if not data:
-                empty_batches += 1
-                offset += batch_size  # важно: не застревать на одном offset
-                if empty_batches >= max_empty_batches:
-                    print("⚠️ No data returned for several attempts, stopping fetch.")
-                    break
-                time.sleep(2)
-                continue
+            while True:
+                try:
+                    response = requests.post(self.url, json=payload, timeout=30, verify=False)
+                    response.raise_for_status()
+                    result = response.json()
 
-            # получили непустой батч — сбрасываем счётчик пустых
-            empty_batches = 0
-            offset += batch_size
+                    data = result.get("result", {}).get("data", [])
 
-            for log in data:
-                key = self._build_log_key(log)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                all_logs.append(log)
+                except Exception as e:
+                    empty_retry += 1
+                    if empty_retry <= MAX_EMPTY_RETRIES:
+                        print(f"✗ Error at offset {offset}, retrying ({empty_retry}/{MAX_EMPTY_RETRIES}): {e}")
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"✗ Max retries reached at offset {offset}")
+                        return all_logs
 
-            # Условие остановки №1: собрали хотя бы заявленное число и текущий батч меньше лимита
-            if len(all_logs) >= total_logs and len(data) < batch_size:
+                # CASE 1: empty batch
+                if not data:
+                    if empty_retry < MAX_EMPTY_RETRIES:
+                        empty_retry += 1
+                        print(f"⚠️ Empty data received at offset {offset}, retrying ({empty_retry}/{MAX_EMPTY_RETRIES})...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"⚠️ No data at offset {offset} after {MAX_EMPTY_RETRIES} retries.")
+                        return all_logs
+
+                # CASE 2: incomplete batch
+                if len(data) < batch_size and (total_logs - offset) > len(data):
+                    incomplete_retry += 1
+                    if incomplete_retry <= MAX_INCOMPLETE_RETRIES:
+                        print(f"⚠️ Incomplete batch at offset {offset}: got {len(data)}, retrying ({incomplete_retry}/{MAX_INCOMPLETE_RETRIES})...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"⚠️ Incomplete batch persists, accepting partial {len(data)}")
+                        all_logs.extend(data)
+                        offset += len(data)
+                        print(f"📥 Fetched {len(all_logs)}/{total_logs} logs")
+                        break
+
+                # CASE 3: normal batch
+                all_logs.extend(data)
+                offset += len(data)
+                print(f"📥 Fetched {len(all_logs)}/{total_logs} logs")
                 break
 
-            # Условие остановки №2: сработал "safety cap"
-            if len(all_logs) >= safe_cap:
-                print(f"⚠️ Safety cap reached while fetching logs: {len(all_logs)} unique entries")
-                break
-
-        # Финальный sanity-check
         if len(all_logs) != total_logs:
-            print(f"⚠️ Requested {total_logs} logs, actually collected {len(all_logs)} unique logs.")
+            print(f"⚠️ Warning: Expected {total_logs} logs but got {len(all_logs)}")
 
         return all_logs
