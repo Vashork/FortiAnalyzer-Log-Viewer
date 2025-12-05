@@ -1,11 +1,9 @@
-# main.py
-
 import os
 import sys
 import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 
 from dotenv import load_dotenv
 
@@ -31,7 +29,7 @@ from utils.network import (
 )
 
 from client.faz_client import FortiAnalyzerClient
-from analyzer.log_analyzer import analyze_logs
+from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
 from utils.output import save_results
 
 
@@ -39,7 +37,7 @@ load_dotenv()
 
 
 # --------------------------
-# VLAN → список IP
+# VLAN Expansion
 # --------------------------
 def expand_targets_from_vlans(vlan_query, vlans_map):
     targets = []
@@ -53,7 +51,7 @@ def expand_targets_from_vlans(vlan_query, vlans_map):
 
 
 # --------------------------
-# Воркер одного направления
+# Worker for inbound/outbound
 # --------------------------
 def process_single_direction(ip_list, direction, start_time, end_time, exclude_ips, ports):
     results = {}
@@ -66,12 +64,11 @@ def process_single_direction(ip_list, direction, start_time, end_time, exclude_i
 
     if not client.login():
         print("❌ Worker login failed", file=sys.stderr)
-        return {}
+        return results
 
     try:
         for ip in ip_list:
-            print(f"\n⚙️ Worker processing {ip} ({direction}) ...")
-
+            print(f"\n⚙️ Worker processing {ip} ({direction})...")
             report_dict = analyze_logs(
                 client=client,
                 target_ips=[ip],
@@ -82,7 +79,6 @@ def process_single_direction(ip_list, direction, start_time, end_time, exclude_i
                 batch_size=BATCH_SIZE,
                 ports=ports,
             )
-
             results.update(report_dict)
     finally:
         client.logout()
@@ -91,7 +87,7 @@ def process_single_direction(ip_list, direction, start_time, end_time, exclude_i
 
 
 # --------------------------
-# Разбиение списка на чанки
+# Split list into N chunks
 # --------------------------
 def chunk_list(lst, n):
     if n <= 1:
@@ -102,13 +98,10 @@ def chunk_list(lst, n):
 
 
 # --------------------------
-# HISTORY
+# HISTORY APPEND
 # --------------------------
 def append_history(history_path: Path, inbound_text: str, outbound_text: str,
                    start_time: str, end_time: str, cmd: str) -> None:
-
-    if not inbound_text and not outbound_text:
-        return
 
     history_path = Path(history_path)
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +117,7 @@ def append_history(history_path: Path, inbound_text: str, outbound_text: str,
     ]
     header = "\n".join(header_lines)
 
-    # Подсчёт количества записей
+    # Count entries by IP-looking patterns
     def count_entries(block: str) -> int:
         if not block:
             return 0
@@ -162,39 +155,127 @@ def append_history(history_path: Path, inbound_text: str, outbound_text: str,
     print(f"📝 Appended results to history: {history_path}")
 
 
-# --------------------------
+# ----------------------------------------------------
+# POLICY MODE (single report)
+# ----------------------------------------------------
+def run_policy_mode(args, target_ips, exclude_ips, ports, start_time, end_time):
+    policyid = args.policyid
+
+    print("\n" + "=" * 60)
+    print(f"➡️  POLICY MODE: policyid={policyid}")
+    print("=" * 60)
+
+    client = FortiAnalyzerClient(
+        url=FORTIANALYZER_URL,
+        username=FORTIANALYZER_USERNAME,
+        password=FORTIANALYZER_PASSWORD,
+    )
+
+    if not client.login():
+        print("❌ Login failed in policyid mode", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        report_text = analyze_policyid_logs(
+            client=client,
+            target_ips=target_ips,
+            policyid=policyid,
+            start_time=start_time,
+            end_time=end_time,
+            exclude_ips=exclude_ips,
+            batch_size=BATCH_SIZE,
+            ports=ports,
+        )
+    finally:
+        client.logout()
+
+    if not report_text:
+        print("⚠️ No data for this policyid.")
+        return
+
+    # prepend command
+    cmd = " ".join(sys.argv)
+    report_with_cmd = cmd + "\n\n" + report_text.strip() + "\n"
+
+    # file name
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(RESULTS_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    policy_file = output_dir / f"policy_{policyid}_{date_str}_last.txt"
+    save_results(report_with_cmd, policy_file)
+    print(f"💾 Saved policyid report to: {policy_file}")
+
+    # user-specified output
+    if args.output:
+        save_results(report_with_cmd, Path(args.output))
+
+    # history as inbound-block
+    history_path = output_dir / "history.txt"
+    append_history(history_path, report_with_cmd, "", start_time, end_time, cmd)
+
+    return
+
+
+# ----------------------------------------------------
+# Graceful STOP — builds partial reports
+# ----------------------------------------------------
+def finalize_partial_results(final_results, start_time, end_time, cmd):
+    """
+    Build inbound/outbound combined results from whatever is ready.
+    """
+    inbound_text = "\n\n".join(
+        text for (ip, d), text in final_results.items() if d == "inbound"
+    ).strip()
+
+    outbound_text = "\n\n".join(
+        text for (ip, d), text in final_results.items() if d == "outbound"
+    ).strip()
+
+    # prepend command
+    if inbound_text:
+        inbound_text = cmd + "\n\n" + inbound_text
+    if outbound_text:
+        outbound_text = cmd + "\n\n" + outbound_text
+
+    # save
+    output_dir = Path(RESULTS_DIR)
+    if inbound_text:
+        save_results(inbound_text, output_dir / "inbound_last.txt")
+    if outbound_text:
+        save_results(outbound_text, output_dir / "outbound_last.txt")
+
+    # history
+    history_path = output_dir / "history.txt"
+    append_history(history_path, inbound_text, outbound_text, start_time, end_time, cmd)
+
+    return inbound_text, outbound_text
+
+
+# ----------------------------------------------------
 # MAIN
-# --------------------------
+# ----------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="FortiAnalyzer Log Viewer")
 
-    parser.add_argument("--input", type=str, help="Input file (default: machines.txt)")
+    parser.add_argument("--input", type=str, help="Input file or CIDR/range (default: machines.txt)")
     parser.add_argument("--exclude", type=str, help="Exclude list")
-
     parser.add_argument("--hours", type=int)
     parser.add_argument("--days", type=int)
     parser.add_argument("--start", type=str)
     parser.add_argument("--end", type=str)
-
     parser.add_argument("--direction", choices=["inbound", "outbound", "all"], default="all")
-
-    parser.add_argument("--vlan", type=str, help="Filter targets by VLAN (vlans.txt)")
-    parser.add_argument("--output", type=str, help="Single output file for combined report")
-
-    parser.add_argument("--workers", type=int, help="Workers count override")
-
-    parser.add_argument(
-        "--proto",
-        action="store_true",
-        help="Filter logs by dstport list from PORTS_FILE (ports.txt)",
-    )
+    parser.add_argument("--vlan", type=str)
+    parser.add_argument("--output", type=str)
+    parser.add_argument("--workers", type=int)
+    parser.add_argument("--proto", action="store_true")
+    parser.add_argument("--policyid", type=int, help="PolicyID analysis mode")
 
     args = parser.parse_args()
-
     validate_config()
 
     # --------------------------
-    # Time window
+    # TIME WINDOW
     # --------------------------
     if args.start and args.end:
         start_time, end_time = args.start, args.end
@@ -208,35 +289,35 @@ def main():
 
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(hours=hours)
-
         start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    print(f"🔍 Analyzing (direction: {args.direction}, time: {start_time} → {end_time})")
+    print(f"🔍 Analyzing: {start_time} → {end_time}")
 
-    # --------------------------
-    # RESULT DIR
-    # --------------------------
     output_dir = Path(RESULTS_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------
-    # VLANs
+    # VLAN
     # --------------------------
     vlans_file = os.getenv("VLANS_FILE", "vlans.txt")
     vlans_map = load_vlans(vlans_file) if Path(vlans_file).exists() else []
 
     # --------------------------
-    # Targets
+    # TARGETS
     # --------------------------
     target_ips = []
 
     if args.vlan:
         target_ips = expand_targets_from_vlans(args.vlan, vlans_map)
     else:
-        input_file = args.input or os.getenv("MACHINES_FILE", "machines.txt")
-        if Path(input_file).exists():
-            target_ips = load_machines(input_file)
+        # CIDR or range?
+        if args.input and any(ch in args.input for ch in ["/", "-"]):
+            target_ips = parse_ip_range(args.input)
+        else:
+            input_file = args.input or os.getenv("MACHINES_FILE", "machines.txt")
+            if Path(input_file).exists():
+                target_ips = load_machines(input_file)
 
     if not target_ips:
         print("❌ No target IPs found")
@@ -249,100 +330,112 @@ def main():
     if args.exclude and Path(args.exclude).exists():
         exclude_ips = set(load_machines(args.exclude))
 
-    # удаляем исключённые цели
+    # filter out excluded targets
     target_ips = [ip for ip in target_ips if ip not in exclude_ips]
 
     # --------------------------
-    # Workers
-    # --------------------------
-    workers = args.workers if args.workers else MAX_WORKERS
-    workers = max(1, workers)
-    print(f"🧵 Using {workers} worker(s)")
-
-    # --------------------------
-    # PORT FILTER (--proto)
+    # PORT FILTER
     # --------------------------
     ports = None
     if args.proto:
         ports_file = os.getenv("PORTS_FILE", "ports.txt")
         ports = load_ports(ports_file)
         if ports:
-            print(f"🎯 Using port filter from {ports_file}: {', '.join(ports)}")
+            print(f"🎯 Port filter: {', '.join(ports)}")
         else:
-            print(f"⚠️ {ports_file} empty → ignoring --proto")
+            print(f"⚠️ {ports_file} empty — ignoring --proto")
             ports = None
 
     # --------------------------
-    # Directions
+    # POLICY MODE
+    # --------------------------
+    if args.policyid is not None:
+        return run_policy_mode(
+            args=args,
+            target_ips=target_ips,
+            exclude_ips=exclude_ips,
+            ports=ports,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    # --------------------------
+    # ORDINARY inbound/outbound MODE
     # --------------------------
     directions = ["inbound", "outbound"] if args.direction == "all" else [args.direction]
+    workers = max(1, args.workers if args.workers else MAX_WORKERS)
+    print(f"🧵 Using {workers} worker(s)")
 
-    final_results: dict[tuple[str, str], str] = {}
+    chunks = chunk_list(target_ips, workers)
+    final_results = {}
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = [
+        executor.submit(
+            process_single_direction,
+            chunk,
+            direc,
+            start_time,
+            end_time,
+            exclude_ips,
+            ports,
+        )
+        for direc in directions
+        for chunk in chunks
+    ]
+
+    cmd = " ".join(sys.argv)
+
+    try:
+        for fut in as_completed(futures):
+            try:
+                res = fut.result()
+                final_results.update(res)
+            except CancelledError:
+                pass
+
+    except KeyboardInterrupt:
+        print("\n⛔ Interrupted by user — stopping workers...")
+        executor.shutdown(wait=False, cancel_futures=True)
+
+        # finalize partial results
+        inbound_text, outbound_text = finalize_partial_results(
+            final_results, start_time, end_time, cmd
+        )
+        print("💾 Partial results saved. Exiting gracefully.")
+        return
 
     # --------------------------
-    # Processing
-    # --------------------------
-    for direc in directions:
-        print("\n" + "=" * 60)
-        print(f"➡️  Direction: {direc}")
-        print("=" * 60)
-
-        chunks = chunk_list(target_ips, workers)
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(
-                    process_single_direction,
-                    chunk,
-                    direc,
-                    start_time,
-                    end_time,
-                    exclude_ips,
-                    ports,
-                )
-                for chunk in chunks
-            ]
-
-            for fut in as_completed(futures):
-                batch_results = fut.result()
-                final_results.update(batch_results)
-
-    # --------------------------
-    # Build combined text
+    # FINALIZE NORMAL MODE
     # --------------------------
     inbound_text = "\n\n".join(
         text for (ip, d), text in final_results.items() if d == "inbound"
     ).strip()
-
     outbound_text = "\n\n".join(
         text for (ip, d), text in final_results.items() if d == "outbound"
     ).strip()
 
-    # --------------------------
-    # Save last-run files
-    # --------------------------
+    if inbound_text:
+        inbound_text = cmd + "\n\n" + inbound_text
+    if outbound_text:
+        outbound_text = cmd + "\n\n" + outbound_text
+
+    # save results
     if inbound_text:
         save_results(inbound_text, output_dir / "inbound_last.txt")
-
     if outbound_text:
         save_results(outbound_text, output_dir / "outbound_last.txt")
 
-    # --------------------------
-    # Optional single file
-    # --------------------------
+    # user output
     if args.output:
         parts = []
         if inbound_text:
             parts.append("[INBOUND]\n" + inbound_text)
         if outbound_text:
             parts.append("[OUTBOUND]\n" + outbound_text)
-        if parts:
-            save_results("\n\n".join(parts), Path(args.output))
+        save_results("\n\n".join(parts), Path(args.output))
 
-    # --------------------------
-    # HISTORY
-    # --------------------------
-    cmd = " ".join(sys.argv)
+    # history
     history_path = output_dir / "history.txt"
     append_history(history_path, inbound_text, outbound_text, start_time, end_time, cmd)
 

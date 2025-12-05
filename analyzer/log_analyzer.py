@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.network import resolve_hostname
 from config import COLUMNS_CONFIG, SMART_ACTION, FILTER_MODE
@@ -16,12 +16,14 @@ def proto_to_name(proto_id) -> str:
 
 
 # ------------------------------------------
-# SMART ACTION MAP (правильный)
+# SMART ACTION MAP (обновлённый: только 3 состояния)
 # ------------------------------------------
+# Используется только для FILTER_MODE=faz — добавляется в фильтр на стороне FAZ.
 SMART_ACTION_MAP = {
     "all-accept": 'smart_action="all-accept"',
-    "deny": 'smart_action="all-deny"',
-    "dns-error": 'smart_action="dns-error"',
+    # deny → берём именно action="deny", чтобы покрывать все случаи,
+    # даже если smart_action не проставлен.
+    "deny": 'action="deny"',
 }
 
 
@@ -34,7 +36,7 @@ class LogAnalyzer:
     # ----------------------------------------------------------
     # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
     # ----------------------------------------------------------
-    def aggregate_by_local(self, logs, direction, target_ips):
+    def aggregate_by_local(self, logs, direction: str, target_ips: List[str]):
         if direction == "inbound":
             local_field = "dstip"
             remote_field = "srcip"
@@ -44,7 +46,7 @@ class LogAnalyzer:
             remote_field = "dstip"
             port_field = "dstport"
 
-        result = defaultdict(
+        result: Dict[str, Dict[Tuple[str, str, str], Dict]] = defaultdict(
             lambda: defaultdict(
                 lambda: {
                     "count": 0,
@@ -74,7 +76,7 @@ class LogAnalyzer:
 
             proto = proto_to_name(log.get("proto"))
             port = log.get(port_field, "-")
-            key = (remote_ip, port, proto)
+            key = (remote_ip, str(port), proto)
             entry = result[local_ip][key]
 
             entry["count"] += 1
@@ -104,10 +106,10 @@ class LogAnalyzer:
         return result
 
     # ----------------------------------------------------------
-    # BUILD HUMAN-READABLE REPORT
+    # BUILD HUMAN-READABLE REPORT (обычный режим)
     # ----------------------------------------------------------
-    def build_reports_per_local(self, stats, direction, target_ips):
-        reports = {}
+    def build_reports_per_local(self, stats, direction: str, target_ips: List[str]):
+        reports: Dict[Tuple[str, str], str] = {}
         show_connections = COLUMNS_CONFIG.get("connections", True)
 
         extra_cols = []
@@ -157,7 +159,9 @@ class LogAnalyzer:
             uniq_ips = set()
 
             # Sort by count descending
-            for (remote, port, proto), d in sorted(items.items(), key=lambda x: -x[1]["count"]):
+            for (remote, port, proto), d in sorted(
+                    items.items(), key=lambda x: -x[1]["count"]
+            ):
                 hostname = resolve_hostname(remote)
                 total_conns += d["count"]
                 uniq_ips.add(remote)
@@ -188,28 +192,183 @@ class LogAnalyzer:
 
         return reports
 
+    # ----------------------------------------------------------
+    # POLICYID MODE — GLOBAL AGGREGATION
+    # ----------------------------------------------------------
+    def aggregate_by_policyid(
+            self,
+            logs,
+            target_ips: List[str],
+    ):
+        """
+        Агрегация по policyid-режиму:
+        ключ = (srcip, dstip, dstport, proto, policyid)
+        """
+        result: Dict[Tuple[str, str, str, str, str], Dict] = defaultdict(
+            lambda: {
+                "count": 0,
+                "actions": set(),
+                "apps": set(),
+                "srcintfs": set(),
+                "dstintfs": set(),
+                "policynames": set(),
+                "devnames": set(),
+            }
+        )
+
+        target_set = set(target_ips) if target_ips else None
+
+        for log in logs:
+            srcip = log.get("srcip")
+            dstip = log.get("dstip")
+            if not srcip or not dstip:
+                continue
+
+            # local exclude: выкидываем любые строки, где src/dst в exclude
+            if srcip in self.exclude_ips or dstip in self.exclude_ips:
+                continue
+
+            if target_set and (srcip not in target_set and dstip not in target_set):
+                continue
+
+            dstport = str(log.get("dstport", "-"))
+            proto = proto_to_name(log.get("proto"))
+            policyid = str(log.get("policyid")) if log.get("policyid") is not None else "-"
+
+            key = (srcip, dstip, dstport, proto, policyid)
+            entry = result[key]
+            entry["count"] += 1
+
+            if log.get("smart_action"):
+                entry["actions"].add(log["smart_action"])
+
+            if log.get("app"):
+                entry["apps"].add(log["app"])
+
+            if log.get("srcintf"):
+                entry["srcintfs"].add(log["srcintf"])
+
+            if log.get("dstintf"):
+                entry["dstintfs"].add(log["dstintf"])
+
+            if log.get("policyname"):
+                entry["policynames"].add(log["policyname"])
+
+            if log.get("devname"):
+                entry["devnames"].add(log["devname"])
+
+        return result
+
+    def build_policyid_report(self, stats, policyid: int) -> str:
+        """
+        Отчёт по policyid:
+        SRC, DST, Port, Proto, PolicyID, Count (+ опциональные колонки из COLUMNS_CONFIG)
+        """
+        if not stats:
+            return ""
+
+        show_connections = COLUMNS_CONFIG.get("connections", True)
+
+        extra_cols = []
+        if COLUMNS_CONFIG.get("action"):
+            extra_cols.append(("Action", "actions"))
+        if COLUMNS_CONFIG.get("app"):
+            extra_cols.append(("App", "apps"))
+        if COLUMNS_CONFIG.get("srcintf"):
+            extra_cols.append(("SrcIntf", "srcintfs"))
+        if COLUMNS_CONFIG.get("dstintf"):
+            extra_cols.append(("DstIntf", "dstintfs"))
+        if COLUMNS_CONFIG.get("policyname"):
+            extra_cols.append(("PolicyName", "policynames"))
+        if COLUMNS_CONFIG.get("devname"):
+            extra_cols.append(("DevName", "devnames"))
+
+        lines: List[str] = [
+            "=" * 110,
+            f"POLICYID ANALYSIS — policyid={policyid}",
+            "=" * 110,
+            "",
+            ]
+
+        columns = [
+            ("SRC", 15),
+            ("DST", 15),
+            ("Port", 6),
+            ("Proto", 5),
+            ("PolicyID", 8),
+        ]
+        if show_connections:
+            columns.append(("Count", 8))
+
+        for col, _ in extra_cols:
+            columns.append((col, 15))
+
+        head = "".join([f"{name:<{width}}  " for name, width in columns])
+        sep = "-" * min(len(head), 140)
+        lines.append(head)
+        lines.append(sep)
+
+        total_conns = 0
+
+        for (src, dst, port, proto, pol), d in sorted(
+                stats.items(), key=lambda x: -x[1]["count"]
+        ):
+            total_conns += d["count"]
+
+            row_parts = [
+                (src, 15),
+                (dst, 15),
+                (port, 6),
+                (proto, 5),
+                (pol, 8),
+            ]
+
+            if show_connections:
+                row_parts.append((str(d["count"]), 8))
+
+            row = "".join([f"{val:<{width}}  " for val, width in row_parts])
+
+            for _, field in extra_cols:
+                values = d.get(field) or set()
+                row += f"{','.join(sorted(values)) or '-':<15}  "
+
+            lines.append(row)
+
+        lines.append("")
+        lines.append(f"Total entries: {total_conns}")
+
+        return "\n".join(lines)
+
 
 # ----------------------------------------------------------
 # FILTER MODE: LOCAL
 # ----------------------------------------------------------
 def _filter_logs_by_smart_action(logs, smart_action: str):
+    smart_action = (smart_action or "all").lower()
+
     if smart_action == "all":
         return logs
 
     if smart_action == "all-accept":
-        return [x for x in logs if x.get("smart_action") == "all-accept"]
+        # принимаем и по smart_action, и по action для надёжности
+        return [
+            x
+            for x in logs
+            if x.get("smart_action") == "all-accept" or x.get("action") == "accept"
+        ]
 
     if smart_action == "deny":
-        return [x for x in logs if x.get("smart_action") == "all-deny"]
-
-    if smart_action == "dns-error":
-        return [x for x in logs if x.get("smart_action") == "dns-error"]
+        return [
+            x
+            for x in logs
+            if x.get("smart_action") in ("all-deny", "deny") or x.get("action") == "deny"
+        ]
 
     return logs
 
 
 # ----------------------------------------------------------
-# BUILD FAZ FILTER (правильный smart_action)
+# BUILD FAZ FILTER (обычный режим, по direction)
 # ----------------------------------------------------------
 def build_faz_filter(
         direction: str,
@@ -245,7 +404,7 @@ def build_faz_filter(
         p = " or ".join([f'(dstport="{x}")' for x in ports])
         combined += f" and ({p})"
 
-    # EXCLUDE on FAZ
+    # EXCLUDE on FAZ (по удалённому IP)
     for ip in exclude_ips:
         combined += f' and ({remote_field}!="{ip}")'
 
@@ -253,7 +412,45 @@ def build_faz_filter(
 
 
 # ----------------------------------------------------------
-# MAIN INTERFACE
+# BUILD FAZ FILTER (policyid mode)
+# ----------------------------------------------------------
+def build_policy_faz_filter(
+        policyid: int,
+        target_ips: List[str],
+        ports: Optional[List[str]] = None,
+) -> str:
+    """
+    Фильтр для режима --policyid.
+    policyid обязателен, IP и порты опциональны (IP бьём и по srcip, и по dstip).
+    """
+    parts: List[str] = [f"(policyid={policyid})"]
+
+    # SMART_ACTION на FAZ
+    if FILTER_MODE == "faz":
+        smart_expr = SMART_ACTION_MAP.get(SMART_ACTION)
+        if smart_expr:
+            parts.append(f"({smart_expr})")
+
+    # IP
+    if target_ips:
+        ip_exprs: List[str] = []
+        for ip in target_ips:
+            ip_exprs.append(f'srcip="{ip}"')
+            ip_exprs.append(f'dstip="{ip}"')
+        parts.append("(" + " or ".join(ip_exprs) + ")")
+
+    # Порты
+    if ports:
+        p = " or ".join([f'(dstport="{x}")' for x in ports])
+        parts.append(f"({p})")
+
+    if not parts:
+        return "all"
+    return " and ".join(parts)
+
+
+# ----------------------------------------------------------
+# MAIN INTERFACE — обычный режим (inbound/outbound)
 # ----------------------------------------------------------
 def analyze_logs(
         client,
@@ -299,3 +496,56 @@ def analyze_logs(
     stats = analyzer.aggregate_by_local(logs, direction, target_ips)
 
     return analyzer.build_reports_per_local(stats, direction, target_ips)
+
+
+# ----------------------------------------------------------
+# MAIN INTERFACE — policyid mode
+# ----------------------------------------------------------
+def analyze_policyid_logs(
+        client,
+        target_ips: List[str],
+        policyid: int,
+        start_time: str,
+        end_time: str,
+        exclude_ips,
+        batch_size: int = 100,
+        ports: Optional[List[str]] = None,
+) -> str:
+    """
+    Режим --policyid:
+      * игнорирует direction
+      * ищет все матчи по policyid
+      * target_ips (если заданы) применяются к srcip/dstip
+      * агрегация по (srcip, dstip, dstport, proto)
+    """
+    filter_str = build_policy_faz_filter(policyid, target_ips, ports)
+
+    print(f"🔎 FILTER: {filter_str}")
+    print(f"🕒 TIME RANGE: {start_time} → {end_time}")
+    print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
+
+    if ports:
+        print(f"🎯 PORTS: {', '.join(ports)}")
+
+    tid = client.create_search_task(filter_str, start_time, end_time)
+    if not tid:
+        print("❌ Failed to create search task (policyid mode)")
+        return ""
+
+    ok, matched = client.wait_for_task_completion(tid)
+    if not ok or matched == 0:
+        print("⚠ No matching logs found in policyid mode.")
+        return ""
+
+    logs = client.fetch_logs(tid, matched, batch_size)
+    if not logs:
+        print("⚠ No logs retrieved in policyid mode.")
+        return ""
+
+    if FILTER_MODE == "local":
+        logs = _filter_logs_by_smart_action(logs, SMART_ACTION)
+
+    analyzer = LogAnalyzer(exclude_ips)
+    stats = analyzer.aggregate_by_policyid(logs, target_ips)
+
+    return analyzer.build_policyid_report(stats, policyid)

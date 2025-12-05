@@ -31,10 +31,11 @@ def _get_bool(name: str, default: str = "false") -> bool:
     return val.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-# Smart-фильтрация по полю action
+# Smart-фильтрация по полю action/smart_action
 SMART_ACTION = os.getenv("SMART_ACTION", "all").strip().lower()
 if SMART_ACTION not in ("all", "deny", "all-accept"):
-    SMART_ACTION = "all"
+    # по умолчанию — только "чистые" accept'ы
+    SMART_ACTION = "all-accept"
 
 # Где применять smart_action: "faz" (в FAZ) или "local" (в Python)
 FILTER_MODE = os.getenv("FILTER_MODE", "FAZ").strip().lower()
