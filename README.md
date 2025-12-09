@@ -65,6 +65,10 @@ python main.py --vlan 2014
 ```bash
 python main.py --input 10.20.0.0/16 --workers 4 --direction outbound
 ```
+```
+python main.py --workers 1  --direction outbound --start "2025-12-01 09:00:00" --end "2025-12-05 22:59:59" --exclude internal_ips
+```
+
 📁 Формат файлов целей
 machines.txt
 ```bash
