@@ -1,8 +1,15 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
 
 from utils.network import resolve_hostname
-from config import COLUMNS_CONFIG, SMART_ACTION, FILTER_MODE
+from config import (
+    COLUMNS_CONFIG,
+    SMART_ACTION,
+    FILTER_MODE,
+    MAX_TASK_HOURS,
+    MAX_MATCHED_LOGS_PER_TASK,
+)
 
 
 # ------------------------------------------
@@ -450,6 +457,41 @@ def build_policy_faz_filter(
 
 
 # ----------------------------------------------------------
+# TIME RANGE SPLITTING
+# ----------------------------------------------------------
+def _split_time_range(start_time: str, end_time: str, max_hours: int):
+    """
+    Нарезает интервал [start_time, end_time] на куски не более max_hours.
+    Если max_hours <= 0 — возвращает один интервал без нарезки.
+    """
+    if max_hours is None or max_hours <= 0:
+        return [(start_time, end_time)]
+
+    fmt = "%Y-%m-%d %H:%M:%S"
+
+    try:
+        start_dt = datetime.strptime(start_time, fmt)
+        end_dt = datetime.strptime(end_time, fmt)
+    except Exception:
+        # если что-то пошло не так с парсингом — не режем
+        return [(start_time, end_time)]
+
+    if start_dt >= end_dt:
+        return [(start_time, end_time)]
+
+    ranges = []
+    delta = timedelta(hours=max_hours)
+    cur = start_dt
+
+    while cur < end_dt:
+        seg_end = min(cur + delta, end_dt)
+        ranges.append((cur.strftime(fmt), seg_end.strftime(fmt)))
+        cur = seg_end
+
+    return ranges
+
+
+# ----------------------------------------------------------
 # MAIN INTERFACE — обычный режим (inbound/outbound)
 # ----------------------------------------------------------
 def analyze_logs(
@@ -472,28 +514,50 @@ def analyze_logs(
     if ports:
         print(f"🎯 PORTS: {', '.join(ports)}")
 
-    # Create FAZ task
-    tid = client.create_search_task(filter_str, start_time, end_time)
-    if not tid:
-        print("❌ Failed to create search task")
-        return {}
+    # Разбиваем временной интервал на более мелкие сегменты,
+    # чтобы один search-task не был гигантским.
+    time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
+    all_logs = []
 
-    ok, matched = client.wait_for_task_completion(tid)
-    if not ok or matched == 0:
-        print("⚠ No matching logs found.")
-        return {}
+    for seg_start, seg_end in time_ranges:
+        print(f"⏱ Segment: {seg_start} → {seg_end}")
 
-    logs = client.fetch_logs(tid, matched, batch_size)
-    if not logs:
+        tid = client.create_search_task(filter_str, seg_start, seg_end)
+        if not tid:
+            print("❌ Failed to create search task for this segment")
+            continue
+
+        ok, matched = client.wait_for_task_completion(tid)
+        if not ok or matched == 0:
+            print("⚠ No matching logs found for this segment.")
+            continue
+
+        # Ограничиваем количество логов на один task, чтобы не убить FAZ.
+        if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
+            print(
+                f"⚠ Matched {matched} logs in segment, exceeding "
+                f"MAX_MATCHED_LOGS_PER_TASK={MAX_MATCHED_LOGS_PER_TASK}. "
+                f"Fetching only first {MAX_MATCHED_LOGS_PER_TASK} logs to protect FortiAnalyzer."
+            )
+            matched = MAX_MATCHED_LOGS_PER_TASK
+
+        logs_segment = client.fetch_logs(tid, matched, batch_size)
+        if not logs_segment:
+            print("⚠ No logs retrieved for this segment.")
+            continue
+
+        all_logs.extend(logs_segment)
+
+    if not all_logs:
         print("⚠ No logs retrieved.")
         return {}
 
     # Local filter
     if FILTER_MODE == "local":
-        logs = _filter_logs_by_smart_action(logs, SMART_ACTION)
+        all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
     analyzer = LogAnalyzer(exclude_ips)
-    stats = analyzer.aggregate_by_local(logs, direction, target_ips)
+    stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
 
     return analyzer.build_reports_per_local(stats, direction, target_ips)
 
@@ -527,25 +591,46 @@ def analyze_policyid_logs(
     if ports:
         print(f"🎯 PORTS: {', '.join(ports)}")
 
-    tid = client.create_search_task(filter_str, start_time, end_time)
-    if not tid:
-        print("❌ Failed to create search task (policyid mode)")
-        return ""
+    # Аналогично обычному режиму — режем временной интервал.
+    time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
+    all_logs = []
 
-    ok, matched = client.wait_for_task_completion(tid)
-    if not ok or matched == 0:
-        print("⚠ No matching logs found in policyid mode.")
-        return ""
+    for seg_start, seg_end in time_ranges:
+        print(f"⏱ Segment: {seg_start} → {seg_end}")
 
-    logs = client.fetch_logs(tid, matched, batch_size)
-    if not logs:
+        tid = client.create_search_task(filter_str, seg_start, seg_end)
+        if not tid:
+            print("❌ Failed to create search task (policyid mode, segment)")
+            continue
+
+        ok, matched = client.wait_for_task_completion(tid)
+        if not ok or matched == 0:
+            print("⚠ No matching logs found in policyid mode for this segment.")
+            continue
+
+        if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
+            print(
+                f"⚠ Matched {matched} logs in segment (policyid mode), exceeding "
+                f"MAX_MATCHED_LOGS_PER_TASK={MAX_MATCHED_LOGS_PER_TASK}. "
+                f"Fetching only first {MAX_MATCHED_LOGS_PER_TASK} logs."
+            )
+            matched = MAX_MATCHED_LOGS_PER_TASK
+
+        logs_segment = client.fetch_logs(tid, matched, batch_size)
+        if not logs_segment:
+            print("⚠ No logs retrieved in policyid mode for this segment.")
+            continue
+
+        all_logs.extend(logs_segment)
+
+    if not all_logs:
         print("⚠ No logs retrieved in policyid mode.")
         return ""
 
     if FILTER_MODE == "local":
-        logs = _filter_logs_by_smart_action(logs, SMART_ACTION)
+        all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
     analyzer = LogAnalyzer(exclude_ips)
-    stats = analyzer.aggregate_by_policyid(logs, target_ips)
+    stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
 
     return analyzer.build_policyid_report(stats, policyid)

@@ -18,6 +18,7 @@ from config import (
     FORTIANALYZER_PASSWORD,
     SMART_ACTION,
     FILTER_MODE,
+    ADAPTIVE_WORKER_THRESHOLD_HOURS,
 )
 
 from utils.network import (
@@ -292,7 +293,18 @@ def main():
         start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    print(f"🔍 Analyzing: {start_time} → {end_time}")
+    # Оценим длительность окна для адаптивного лимита воркеров
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        start_dt_parsed = datetime.strptime(start_time, fmt)
+        end_dt_parsed = datetime.strptime(end_time, fmt)
+        time_span_hours = max(
+            0.0, (end_dt_parsed - start_dt_parsed).total_seconds() / 3600.0
+        )
+    except Exception:
+        time_span_hours = 0.0
+
+    print(f"🔍 Analyzing: {start_time} → {end_time} (≈{time_span_hours:.2f}h)")
 
     output_dir = Path(RESULTS_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +345,10 @@ def main():
     # filter out excluded targets
     target_ips = [ip for ip in target_ips if ip not in exclude_ips]
 
+    if not target_ips:
+        print("❌ All target IPs were excluded")
+        sys.exit(1)
+
     # --------------------------
     # PORT FILTER
     # --------------------------
@@ -363,7 +379,24 @@ def main():
     # ORDINARY inbound/outbound MODE
     # --------------------------
     directions = ["inbound", "outbound"] if args.direction == "all" else [args.direction]
+
+    # Базовое количество воркеров
     workers = max(1, args.workers if args.workers else MAX_WORKERS)
+
+    # Адаптивное ограничение по длительности окна
+    if (
+            ADAPTIVE_WORKER_THRESHOLD_HOURS > 0
+            and time_span_hours >= ADAPTIVE_WORKER_THRESHOLD_HOURS
+            and workers > 1
+    ):
+        print(
+            f"⚠ Large time window (≈{time_span_hours:.1f}h ≥ "
+            f"{ADAPTIVE_WORKER_THRESHOLD_HOURS}h). Forcing single worker to protect FortiAnalyzer."
+        )
+        workers = 1
+
+    # Не имеет смысла воркеров больше, чем целей
+    workers = min(workers, len(target_ips))
     print(f"🧵 Using {workers} worker(s)")
 
     chunks = chunk_list(target_ips, workers)
@@ -382,6 +415,7 @@ def main():
         )
         for direc in directions
         for chunk in chunks
+        if chunk  # пустые чанки не запускаем
     ]
 
     cmd = " ".join(sys.argv)

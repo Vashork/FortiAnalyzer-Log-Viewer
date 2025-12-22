@@ -17,7 +17,7 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", 100))
 RESULTS_DIR = os.getenv("RESULTS_DIR", "results")
 
 # Performance tuning
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 2))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 1))
 
 # Лимит подряд идущих пустых батчей при fetch_logs
 EMPTY_BATCH_LIMIT = int(os.getenv("EMPTY_BATCH_LIMIT", 5))
@@ -62,6 +62,19 @@ COLUMNS_CONFIG = {
     # "dstport": _get_bool("COLUMN_DSTPORT", "false"),
     # "proto": _get_bool("COLUMN_PROTO", "false"),
 }
+
+# Максимальная длительность одного FAZ-search task в часах.
+# Если 0 → нарезка по времени отключена.
+MAX_TASK_HOURS = int(os.getenv("MAX_TASK_HOURS", "4"))
+
+# Максимальное количество логов, которые мы готовы вытянуть для одного task.
+# Если 0 → без лимита (может быть тяжело для FAZ).
+MAX_MATCHED_LOGS_PER_TASK = int(os.getenv("MAX_MATCHED_LOGS_PER_TASK", "200000"))
+
+# Если общее временное окно (start→end) >= этого порога (часов),
+# то принудительно уменьшаем число воркеров до 1, чтобы не душить FAZ.
+# Если 0 → адаптивное ограничение выключено.
+ADAPTIVE_WORKER_THRESHOLD_HOURS = int(os.getenv("ADAPTIVE_WORKER_THRESHOLD_HOURS", "24"))
 
 
 def validate_config():
