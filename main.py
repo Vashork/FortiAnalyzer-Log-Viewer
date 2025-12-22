@@ -163,7 +163,8 @@ def run_policy_mode(args, target_ips, exclude_ips, ports, start_time, end_time):
     policyid = args.policyid
 
     print("\n" + "=" * 60)
-    print(f"➡️  POLICY MODE: policyid={policyid}")
+    if not target_ips:
+        print("ℹ Policy mode: GLOBAL search (no IP filter applied)")
     print("=" * 60)
 
     client = FortiAnalyzerClient(
@@ -331,7 +332,7 @@ def main():
             if Path(input_file).exists():
                 target_ips = load_machines(input_file)
 
-    if not target_ips:
+    if not target_ips and args.policyid is None:
         print("❌ No target IPs found")
         sys.exit(1)
 
@@ -345,7 +346,7 @@ def main():
     # filter out excluded targets
     target_ips = [ip for ip in target_ips if ip not in exclude_ips]
 
-    if not target_ips:
+    if not target_ips and args.policyid is None:
         print("❌ All target IPs were excluded")
         sys.exit(1)
 
