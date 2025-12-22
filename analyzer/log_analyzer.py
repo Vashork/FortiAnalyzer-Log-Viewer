@@ -23,19 +23,16 @@ def proto_to_name(proto_id) -> str:
 
 
 # ------------------------------------------
-# SMART ACTION MAP (обновлённый: только 3 состояния)
+# SMART ACTION MAP (используется на FAZ)
 # ------------------------------------------
-# Используется только для FILTER_MODE=faz — добавляется в фильтр на стороне FAZ.
 SMART_ACTION_MAP = {
     "all-accept": 'smart_action="all-accept"',
-    # deny → берём именно action="deny", чтобы покрывать все случаи,
-    # даже если smart_action не проставлен.
     "deny": 'action="deny"',
 }
 
 
 class LogAnalyzer:
-    """Aggregates logs into structured per-local reports."""
+    """Aggregates logs into structured reports."""
 
     def __init__(self, exclude_ips: List[str]):
         self.exclude_ips = set(exclude_ips)
@@ -76,8 +73,6 @@ class LogAnalyzer:
                 continue
             if local_ip not in target_ips:
                 continue
-
-            # Python-level exclude (вариант C)
             if remote_ip in self.exclude_ips:
                 continue
 
@@ -88,32 +83,25 @@ class LogAnalyzer:
 
             entry["count"] += 1
 
-            # поля
             if log.get("smart_action"):
                 entry["actions"].add(log["smart_action"])
-
             if log.get("policyid") is not None:
                 entry["policyids"].add(str(log["policyid"]))
-
             if log.get("app"):
                 entry["apps"].add(log["app"])
-
             if log.get("srcintf"):
                 entry["srcintfs"].add(log["srcintf"])
-
             if log.get("dstintf"):
                 entry["dstintfs"].add(log["dstintf"])
-
             if log.get("policyname"):
                 entry["policynames"].add(log["policyname"])
-
             if log.get("devname"):
                 entry["devnames"].add(log["devname"])
 
         return result
 
     # ----------------------------------------------------------
-    # BUILD HUMAN-READABLE REPORT (обычный режим)
+    # BUILD REPORTS (inbound/outbound)
     # ----------------------------------------------------------
     def build_reports_per_local(self, stats, direction: str, target_ips: List[str]):
         reports: Dict[Tuple[str, str], str] = {}
@@ -143,7 +131,6 @@ class LogAnalyzer:
                 "",
                 ]
 
-            # Header
             columns = [
                 ("Remote IP", 15),
                 ("Hostname", 30),
@@ -152,20 +139,17 @@ class LogAnalyzer:
             ]
             if show_connections:
                 columns.append(("Connections", 11))
-
             for col, _ in extra_cols:
                 columns.append((col, 15))
 
             head = "".join([f"{name:<{width}}  " for name, width in columns])
             sep = "-" * min(len(head), 140)
-
             lines.append(head)
             lines.append(sep)
 
             total_conns = 0
             uniq_ips = set()
 
-            # Sort by count descending
             for (remote, port, proto), d in sorted(
                     items.items(), key=lambda x: -x[1]["count"]
             ):
@@ -179,16 +163,13 @@ class LogAnalyzer:
                     (port, 6),
                     (proto, 5),
                 ]
-
                 if show_connections:
                     row_parts.append((str(d["count"]), 11))
 
                 row = "".join([f"{val:<{width}}  " for val, width in row_parts])
-
                 for _, field in extra_cols:
                     values = d.get(field) or set()
                     row += f"{','.join(sorted(values)) or '-':<15}  "
-
                 lines.append(row)
 
             lines.append("")
@@ -202,15 +183,7 @@ class LogAnalyzer:
     # ----------------------------------------------------------
     # POLICYID MODE — GLOBAL AGGREGATION
     # ----------------------------------------------------------
-    def aggregate_by_policyid(
-            self,
-            logs,
-            target_ips: List[str],
-    ):
-        """
-        Агрегация по policyid-режиму:
-        ключ = (srcip, dstip, dstport, proto, policyid)
-        """
+    def aggregate_by_policyid(self, logs, target_ips: List[str]):
         result: Dict[Tuple[str, str, str, str, str], Dict] = defaultdict(
             lambda: {
                 "count": 0,
@@ -230,11 +203,8 @@ class LogAnalyzer:
             dstip = log.get("dstip")
             if not srcip or not dstip:
                 continue
-
-            # local exclude: выкидываем любые строки, где src/dst в exclude
             if srcip in self.exclude_ips or dstip in self.exclude_ips:
                 continue
-
             if target_set and (srcip not in target_set and dstip not in target_set):
                 continue
 
@@ -248,29 +218,20 @@ class LogAnalyzer:
 
             if log.get("smart_action"):
                 entry["actions"].add(log["smart_action"])
-
             if log.get("app"):
                 entry["apps"].add(log["app"])
-
             if log.get("srcintf"):
                 entry["srcintfs"].add(log["srcintf"])
-
             if log.get("dstintf"):
                 entry["dstintfs"].add(log["dstintf"])
-
             if log.get("policyname"):
                 entry["policynames"].add(log["policyname"])
-
             if log.get("devname"):
                 entry["devnames"].add(log["devname"])
 
         return result
 
     def build_policyid_report(self, stats, policyid: int) -> str:
-        """
-        Отчёт по policyid:
-        SRC, DST, Port, Proto, PolicyID, Count (+ опциональные колонки из COLUMNS_CONFIG)
-        """
         if not stats:
             return ""
 
@@ -290,7 +251,7 @@ class LogAnalyzer:
         if COLUMNS_CONFIG.get("devname"):
             extra_cols.append(("DevName", "devnames"))
 
-        lines: List[str] = [
+        lines = [
             "=" * 110,
             f"POLICYID ANALYSIS — policyid={policyid}",
             "=" * 110,
@@ -306,7 +267,6 @@ class LogAnalyzer:
         ]
         if show_connections:
             columns.append(("Count", 8))
-
         for col, _ in extra_cols:
             columns.append((col, 15))
 
@@ -316,12 +276,10 @@ class LogAnalyzer:
         lines.append(sep)
 
         total_conns = 0
-
         for (src, dst, port, proto, pol), d in sorted(
                 stats.items(), key=lambda x: -x[1]["count"]
         ):
             total_conns += d["count"]
-
             row_parts = [
                 (src, 15),
                 (dst, 15),
@@ -329,61 +287,72 @@ class LogAnalyzer:
                 (proto, 5),
                 (pol, 8),
             ]
-
             if show_connections:
                 row_parts.append((str(d["count"]), 8))
 
             row = "".join([f"{val:<{width}}  " for val, width in row_parts])
-
             for _, field in extra_cols:
                 values = d.get(field) or set()
                 row += f"{','.join(sorted(values)) or '-':<15}  "
-
             lines.append(row)
 
         lines.append("")
         lines.append(f"Total entries: {total_conns}")
-
         return "\n".join(lines)
 
 
 # ----------------------------------------------------------
-# FILTER MODE: LOCAL
+# LOCAL SMART-ACTION FILTER
 # ----------------------------------------------------------
 def _filter_logs_by_smart_action(logs, smart_action: str):
     smart_action = (smart_action or "all").lower()
 
     if smart_action == "all":
         return logs
-
     if smart_action == "all-accept":
-        # принимаем и по smart_action, и по action для надёжности
         return [
-            x
-            for x in logs
+            x for x in logs
             if x.get("smart_action") == "all-accept" or x.get("action") == "accept"
         ]
-
     if smart_action == "deny":
         return [
-            x
-            for x in logs
+            x for x in logs
             if x.get("smart_action") in ("all-deny", "deny") or x.get("action") == "deny"
         ]
-
     return logs
 
 
 # ----------------------------------------------------------
-# BUILD FAZ FILTER (обычный режим, по direction)
+# TIME RANGE SPLITTING
 # ----------------------------------------------------------
-def build_faz_filter(
-        direction: str,
-        target_ips: List[str],
-        ports: Optional[List[str]] = None,
-        exclude_ips: Optional[List[str]] = None,
-) -> str:
+def _split_time_range(start_time: str, end_time: str, max_hours: int):
+    if not max_hours or max_hours <= 0:
+        return [(start_time, end_time)]
 
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        start_dt = datetime.strptime(start_time, fmt)
+        end_dt = datetime.strptime(end_time, fmt)
+    except Exception:
+        return [(start_time, end_time)]
+
+    if start_dt >= end_dt:
+        return [(start_time, end_time)]
+
+    ranges = []
+    delta = timedelta(hours=max_hours)
+    cur = start_dt
+    while cur < end_dt:
+        seg_end = min(cur + delta, end_dt)
+        ranges.append((cur.strftime(fmt), seg_end.strftime(fmt)))
+        cur = seg_end
+    return ranges
+
+
+# ----------------------------------------------------------
+# FAZ FILTERS
+# ----------------------------------------------------------
+def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None):
     exclude_ips = exclude_ips or []
 
     if direction == "inbound":
@@ -393,106 +362,51 @@ def build_faz_filter(
         local_field = "srcip"
         remote_field = "dstip"
 
-    # Base
     if len(target_ips) == 1:
-        combined = f'({local_field} = "{target_ips[0]}")'
+        combined = f'({local_field}="{target_ips[0]}")'
     else:
         vals = ",".join([f'"{ip}"' for ip in target_ips])
         combined = f"({local_field} in [{vals}])"
 
-    # SMART ACTION on FAZ
     if FILTER_MODE == "faz":
         smart_expr = SMART_ACTION_MAP.get(SMART_ACTION)
         if smart_expr:
             combined += f" and ({smart_expr})"
 
-    # Ports
     if ports:
         p = " or ".join([f'(dstport="{x}")' for x in ports])
         combined += f" and ({p})"
 
-    # EXCLUDE on FAZ (по удалённому IP)
     for ip in exclude_ips:
         combined += f' and ({remote_field}!="{ip}")'
 
     return combined
 
 
-# ----------------------------------------------------------
-# BUILD FAZ FILTER (policyid mode)
-# ----------------------------------------------------------
-def build_policy_faz_filter(
-        policyid: int,
-        target_ips: List[str],
-        ports: Optional[List[str]] = None,
-) -> str:
-    """
-    Фильтр для режима --policyid.
-    policyid обязателен, IP и порты опциональны (IP бьём и по srcip, и по dstip).
-    """
-    parts: List[str] = [f"(policyid={policyid})"]
+def build_policy_faz_filter(policyid: int, target_ips: List[str], ports=None) -> str:
+    parts = [f"(policyid={policyid})"]
 
-    # SMART_ACTION на FAZ
     if FILTER_MODE == "faz":
         smart_expr = SMART_ACTION_MAP.get(SMART_ACTION)
         if smart_expr:
             parts.append(f"({smart_expr})")
 
-    # IP
     if target_ips:
-        ip_exprs: List[str] = []
+        ip_exprs = []
         for ip in target_ips:
             ip_exprs.append(f'srcip="{ip}"')
             ip_exprs.append(f'dstip="{ip}"')
         parts.append("(" + " or ".join(ip_exprs) + ")")
 
-    # Порты
     if ports:
         p = " or ".join([f'(dstport="{x}")' for x in ports])
         parts.append(f"({p})")
 
-    if not parts:
-        return "all"
     return " and ".join(parts)
 
 
 # ----------------------------------------------------------
-# TIME RANGE SPLITTING
-# ----------------------------------------------------------
-def _split_time_range(start_time: str, end_time: str, max_hours: int):
-    """
-    Нарезает интервал [start_time, end_time] на куски не более max_hours.
-    Если max_hours <= 0 — возвращает один интервал без нарезки.
-    """
-    if max_hours is None or max_hours <= 0:
-        return [(start_time, end_time)]
-
-    fmt = "%Y-%m-%d %H:%M:%S"
-
-    try:
-        start_dt = datetime.strptime(start_time, fmt)
-        end_dt = datetime.strptime(end_time, fmt)
-    except Exception:
-        # если что-то пошло не так с парсингом — не режем
-        return [(start_time, end_time)]
-
-    if start_dt >= end_dt:
-        return [(start_time, end_time)]
-
-    ranges = []
-    delta = timedelta(hours=max_hours)
-    cur = start_dt
-
-    while cur < end_dt:
-        seg_end = min(cur + delta, end_dt)
-        ranges.append((cur.strftime(fmt), seg_end.strftime(fmt)))
-        cur = seg_end
-
-    return ranges
-
-
-# ----------------------------------------------------------
-# MAIN INTERFACE — обычный режим (inbound/outbound)
+# MAIN INTERFACE — inbound / outbound
 # ----------------------------------------------------------
 def analyze_logs(
         client,
@@ -502,20 +416,14 @@ def analyze_logs(
         end_time,
         exclude_ips,
         batch_size=100,
-        ports: Optional[List[str]] = None,
+        ports=None,
 ):
-
     filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
 
     print(f"🔎 FILTER: {filter_str}")
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
     print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
-    if ports:
-        print(f"🎯 PORTS: {', '.join(ports)}")
-
-    # Разбиваем временной интервал на более мелкие сегменты,
-    # чтобы один search-task не был гигантским.
     time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
     all_logs = []
 
@@ -524,41 +432,27 @@ def analyze_logs(
 
         tid = client.create_search_task(filter_str, seg_start, seg_end)
         if not tid:
-            print("❌ Failed to create search task for this segment")
             continue
 
         ok, matched = client.wait_for_task_completion(tid)
         if not ok or matched == 0:
-            print("⚠ No matching logs found for this segment.")
             continue
 
-        # Ограничиваем количество логов на один task, чтобы не убить FAZ.
         if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
-            print(
-                f"⚠ Matched {matched} logs in segment, exceeding "
-                f"MAX_MATCHED_LOGS_PER_TASK={MAX_MATCHED_LOGS_PER_TASK}. "
-                f"Fetching only first {MAX_MATCHED_LOGS_PER_TASK} logs to protect FortiAnalyzer."
-            )
             matched = MAX_MATCHED_LOGS_PER_TASK
 
         logs_segment = client.fetch_logs(tid, matched, batch_size)
-        if not logs_segment:
-            print("⚠ No logs retrieved for this segment.")
-            continue
-
-        all_logs.extend(logs_segment)
+        if logs_segment:
+            all_logs.extend(logs_segment)
 
     if not all_logs:
-        print("⚠ No logs retrieved.")
         return {}
 
-    # Local filter
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
     analyzer = LogAnalyzer(exclude_ips)
     stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
-
     return analyzer.build_reports_per_local(stats, direction, target_ips)
 
 
@@ -567,31 +461,20 @@ def analyze_logs(
 # ----------------------------------------------------------
 def analyze_policyid_logs(
         client,
-        target_ips: List[str],
-        policyid: int,
-        start_time: str,
-        end_time: str,
+        target_ips,
+        policyid,
+        start_time,
+        end_time,
         exclude_ips,
-        batch_size: int = 100,
-        ports: Optional[List[str]] = None,
-) -> str:
-    """
-    Режим --policyid:
-      * игнорирует direction
-      * ищет все матчи по policyid
-      * target_ips (если заданы) применяются к srcip/dstip
-      * агрегация по (srcip, dstip, dstport, proto)
-    """
+        batch_size=100,
+        ports=None,
+):
     filter_str = build_policy_faz_filter(policyid, target_ips, ports)
 
     print(f"🔎 FILTER: {filter_str}")
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
     print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
-    if ports:
-        print(f"🎯 PORTS: {', '.join(ports)}")
-
-    # Аналогично обычному режиму — режем временной интервал.
     time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
     all_logs = []
 
@@ -600,31 +483,20 @@ def analyze_policyid_logs(
 
         tid = client.create_search_task(filter_str, seg_start, seg_end)
         if not tid:
-            print("❌ Failed to create search task (policyid mode, segment)")
             continue
 
         ok, matched = client.wait_for_task_completion(tid)
         if not ok or matched == 0:
-            print("⚠ No matching logs found in policyid mode for this segment.")
             continue
 
         if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
-            print(
-                f"⚠ Matched {matched} logs in segment (policyid mode), exceeding "
-                f"MAX_MATCHED_LOGS_PER_TASK={MAX_MATCHED_LOGS_PER_TASK}. "
-                f"Fetching only first {MAX_MATCHED_LOGS_PER_TASK} logs."
-            )
             matched = MAX_MATCHED_LOGS_PER_TASK
 
         logs_segment = client.fetch_logs(tid, matched, batch_size)
-        if not logs_segment:
-            print("⚠ No logs retrieved in policyid mode for this segment.")
-            continue
-
-        all_logs.extend(logs_segment)
+        if logs_segment:
+            all_logs.extend(logs_segment)
 
     if not all_logs:
-        print("⚠ No logs retrieved in policyid mode.")
         return ""
 
     if FILTER_MODE == "local":
@@ -632,5 +504,4 @@ def analyze_policyid_logs(
 
     analyzer = LogAnalyzer(exclude_ips)
     stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
-
     return analyzer.build_policyid_report(stats, policyid)
