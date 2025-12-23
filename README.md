@@ -1,55 +1,61 @@
-# FortiAnalyzer Log Viewer
+FortiAnalyzer Log Viewer
+Утилита для анализа логов FortiAnalyzer (v7.6.x) через JSON-RPC API.
+Инструмент предназначен для сетевых инженеров и администраторов, которым необходимо:
+анализировать сетевой трафик по IP-адресам, VLAN и policyid
+работать с inbound / outbound направлениями
+ограничивать временные окна анализа
+получать агрегированные и человекочитаемые отчёты
+безопасно обрабатывать большие объёмы логов
+сохранять частичные результаты при прерывании выполнения
 
-Утилита для анализа логов FortiAnalyzer v7.6.3 через JSON-RPC API.  
-Позволяет собирать трафик по IP-адресам, VLAN-ам, диапазонам, CIDR-сетям, с поддержкой фильтрации направлений и временных окон.  
-Результаты автоматически сохраняются в структурированные файлы, включая историю запусков.
+🚀 Установка
+1. Клонирование проекта
+   git clone <ваш-репозиторий>
+   cd falogviewer
 
----
+2. Создание виртуального окружения
+   python -m venv .venv
 
-## 🚀 Установка
-
-### 1. Клонирование проекта
+Linux / macOS:
 ```bash
-git clone <ваш-репозиторий>
-cd falogviewer
+source .venv/bin/activate\
 ```
 
-### 2. Создание виртуального окружения
-```bash
-python -m venv .venv
-```
-Linux/macOS:
-```bash
-source .venv/bin/activate
-```
 Windows:
+
 ```bash
-.venv\Scripts\activate
-```
-### 3. Установка зависимостей
+ .venv\Scripts\activate
+ ```
+
+3. Установка зависимостей
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## 🔧 Конфигурация
+🔧 Конфигурация
 
-Создайте файл .env из шаблона .env.example.
+Создайте файл .env на основе .env.example.
 
-Обязательные параметры:
+Обязательные параметры
+```
+FORTIANALYZER_URL=https://faz.example.local/jsonrpc
+FORTIANALYZER_USERNAME=admin
+FORTIANALYZER_PASSWORD=secret
 
-FORTIANALYZER_URL — адрес JSON-RPC API FortiAnalyzer
-FORTIANALYZER_USERNAME — пользователь
-FORTIANALYZER_PASSWORD — пароль
-
-Опциональные параметры:
-
-DEFAULT_TIME_RANGE_HOURS — период по умолчанию (24 ч)
-BATCH_SIZE — размер пачки логов (100+)
-RESULTS_DIR — путь для результатов (по умолчанию: results/)
-MAX_WORKERS — количество потоков обработки
-
+Опциональные параметры
+DEFAULT_TIME_RANGE_HOURS=24
+BATCH_SIZE=100
+RESULTS_DIR=results
+MAX_WORKERS=4
+MAX_TASK_HOURS=6
+MAX_MATCHED_LOGS_PER_TASK=50000
+FILTER_MODE=faz
+SMART_ACTION=all-accept
+```
 📌 Основные режимы запуска
 Анализ машин из файла за последние 6 часов
+
 ```bash
 python main.py --input machines.txt --hours 6
 ```
@@ -58,37 +64,58 @@ python main.py --input machines.txt --hours 6
 python main.py --vlan SecVlan --days 1
 ```
 или:
+
 ```bash
 python main.py --vlan 2014
 ```
-Анализ по сети в CIDR
+Анализ по CIDR или диапазону IP
+
 ```bash
 python main.py --input 10.20.0.0/16 --workers 4 --direction outbound
 ```
+Явный временной интервал
+```bash
+python main.py --workers 1 \
+--direction outbound \
+--start \"2025-12-01 09:00:00\" \
+--end   \"2025-12-05 22:59:59\" \
+--exclude internal_ips.txt
 ```
-python main.py --workers 1  --direction outbound --start "2025-12-01 09:00:00" --end "2025-12-05 22:59:59" --exclude internal_ips
+🆔 PolicyID режим (глобальный)
+Анализ всех логов по конкретной firewall-политике без привязки к machines.txt.
+```bash
+python main.py --policyid 742 \
+--start \"2025-12-22 12:00:00\" \
+--end   \"2025-12-22 12:30:00\"
 ```
+Особенности:
+- поиск идёт глобально по policyid
+- target IP необязателен
+- агрегация по уникальной связке:
+(srcip, dstip, port, proto, policyid)
+- поддерживается безопасное прерывание (Ctrl+C)
 
 📁 Формат файлов целей
 machines.txt
-```bash
+```
 10.20.7.93
 10.20.8.88
 orion.diasoft.ru
 192.168.1.10-192.168.1.20
 ```
-Поддерживает:
-- одиночные IP
-- домены (резолвятся в IP)
-- диапазоны A-B
-- CIDR-сети
+
+Поддерживаются:
+-одиночные IP
+-доменные имена (резолвятся в IP)
+-диапазоны A-B
+-CIDR-сети
 
 vlans.txt
-```bash
+```
 192.168.0.0/24   2014   SecVlan
 10.20.0.0/16     100    Internal
 ```
-Используется параметром:
+Использование:
 ```bash
 --vlan SecVlan
 ```
@@ -96,109 +123,109 @@ vlans.txt
 ```bash
 --vlan 2014
 ```
-
 ⚙️ Параметры командной строки
 Временные диапазоны
+За 12 часов:
 
-Анализ за 12 часов:
-```bash
+```
 --hours 12
 ```
-Анализ за 2 дня:
-```bash
+За 2 дня:
+```
 --days 2
 ```
-Явный временной интервал:
+Явный интервал:
 ```bash
---start "2025-11-10 08:00:00" --end "2025-11-10 18:00:00"
+--start \"2025-11-10 08:00:00\" --end \"2025-11-10 18:00:00\"
 ```
 Направление трафика
 Только входящий:
-```bash
+```
 --direction inbound
 ```
 Только исходящий:
-```bash
+```
 --direction outbound
 ```
+
 Оба направления:
-```bash
+```
 --direction all
 ```
 Исключение IP
-```bash
+```
 --exclude internal_ips.txt
 ```
 Параллельная обработка
-```bash
+```
 --workers 4
 ```
 📤 Результаты
-```bash
-После каждого запуска формируются:
-results/inbound_last.txt — последний входящий анализ
-results/outbound_last.txt — последний исходящий анализ
-results/history.txt — история всех запусков
-Формат history.txt
+После каждого запуска формируются файлы:
+- results/inbound_last.txt — последний inbound-анализ
+- results/outbound_last.txt — последний outbound-анализ
+- results/history.txt — история всех запусков
 
+Пример history.txt
+```
 === FortiAnalyzer Export — 2025-11-16 17:57 (UTC+3) ===
 Inbound: 3 records
 Outbound: 1241 records
 =========================================================
 
 --- INBOUND LOGS ---
-...лог...
+...
 
 --- OUTBOUND LOGS ---
-...лог...
+...
+```
 ```
 📂 Структура проекта
-```bash
 falogviewer/
 ├── main.py                 # Точка входа
 ├── config.py               # Конфигурация и чтение .env
 ├── requirements.txt        # Зависимости
 ├── .env.example            # Шаблон конфигурации
-├── machines.txt            # Список целей (опционально)
-├── vlans.txt               # VLAN-описания (опционально)
-├── results/                # Результаты поиска
+├── machines.txt            # Список целей
+├── vlans.txt               # VLAN-описания
+├── results/
 │   ├── inbound_last.txt
 │   ├── outbound_last.txt
 │   └── history.txt
 ├── analyzer/
-│   └── log_analyzer.py     # Логика анализа логов
+│   └── log_analyzer.py     # Анализ логов
 ├── client/
 │   └── faz_client.py       # FortiAnalyzer JSON-RPC клиент
 └── utils/
-├── network.py          # Парсинг IP, диапазонов, VLAN
-└── output.py           # Запись результатов на диск
+├── network.py          # IP / VLAN / диапазоны
+└── output.py           # Сохранение результатов
 ```
 🔒 Безопасность
-
-Файл .env находится в .gitignore
-Никогда не коммитьте пароль FortiAnalyzer
-Если файл уже попал в git — срочно смените пароль
+- Файл .env находится в .gitignore
+- Никогда не коммитьте пароль FortiAnalyzer
+- Если пароль попал в репозиторий — немедленно смените его
 
 🛠 Требования
-
-Python 3.7+
-FortiAnalyzer v7.6.3
-Доступ к DNS
-Сетевой доступ к FortiAnalyzer API
+- Python 3.7+
+- FortiAnalyzer v7.6.x
+- Доступ к DNS
+- Сетевой доступ к FortiAnalyzer JSON-RPC API
 
 ⚡ Советы по производительности
-
-Увеличьте BATCH_SIZE в .env:
-```bash
+Увеличьте размер пачки:
+```
 BATCH_SIZE=500
 ```
-Используйте --workers 2-4 для ускорения
 
+Используйте несколько воркеров:
+```
+--workers 2-4
+```
 Сужайте окно анализа:
-```bash
+```
 --hours 1
 ```
 Используйте VLAN вместо длинных списков IP:
-```bash
+```
 --vlan CorpNet
 ```

@@ -11,7 +11,6 @@ from config import (
     MAX_MATCHED_LOGS_PER_TASK,
 )
 
-
 # ------------------------------------------
 # PROTOCOL NAMES
 # ------------------------------------------
@@ -29,6 +28,41 @@ SMART_ACTION_MAP = {
     "all-accept": 'smart_action="all-accept"',
     "deny": 'action="deny"',
 }
+
+
+# ------------------------------------------
+# SAFE TIME RANGE SPLITTER (ШАГ 1)
+# ------------------------------------------
+def split_time_range_safe(start_time: str, end_time: str, max_hours: int):
+    """
+    Надёжно режет временной интервал на сегменты.
+    Гарантированно НЕ возвращает один сегмент,
+    если max_hours > 0 и даты валидны.
+    """
+
+    if not max_hours or max_hours <= 0:
+        return [(start_time, end_time)]
+
+    # нормализация 23:59:99 → 23:59:59
+    if end_time.endswith(":99"):
+        end_time = end_time[:-2] + "59"
+
+    fmt = "%Y-%m-%d %H:%M:%S"
+    start_dt = datetime.strptime(start_time, fmt)
+    end_dt = datetime.strptime(end_time, fmt)
+
+    segments = []
+    delta = timedelta(hours=max_hours)
+    cur = start_dt
+
+    while cur < end_dt:
+        seg_end = min(cur + delta, end_dt)
+        segments.append(
+            (cur.strftime(fmt), seg_end.strftime(fmt))
+        )
+        cur = seg_end
+
+    return segments
 
 
 class LogAnalyzer:
@@ -323,33 +357,6 @@ def _filter_logs_by_smart_action(logs, smart_action: str):
 
 
 # ----------------------------------------------------------
-# TIME RANGE SPLITTING
-# ----------------------------------------------------------
-def _split_time_range(start_time: str, end_time: str, max_hours: int):
-    if not max_hours or max_hours <= 0:
-        return [(start_time, end_time)]
-
-    fmt = "%Y-%m-%d %H:%M:%S"
-    try:
-        start_dt = datetime.strptime(start_time, fmt)
-        end_dt = datetime.strptime(end_time, fmt)
-    except Exception:
-        return [(start_time, end_time)]
-
-    if start_dt >= end_dt:
-        return [(start_time, end_time)]
-
-    ranges = []
-    delta = timedelta(hours=max_hours)
-    cur = start_dt
-    while cur < end_dt:
-        seg_end = min(cur + delta, end_dt)
-        ranges.append((cur.strftime(fmt), seg_end.strftime(fmt)))
-        cur = seg_end
-    return ranges
-
-
-# ----------------------------------------------------------
 # FAZ FILTERS
 # ----------------------------------------------------------
 def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None):
@@ -424,7 +431,7 @@ def analyze_logs(
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
     print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
-    time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
+    time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
     all_logs = []
 
     for seg_start, seg_end in time_ranges:
@@ -475,7 +482,7 @@ def analyze_policyid_logs(
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
     print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
-    time_ranges = _split_time_range(start_time, end_time, MAX_TASK_HOURS)
+    time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
     all_logs = []
 
     for seg_start, seg_end in time_ranges:
