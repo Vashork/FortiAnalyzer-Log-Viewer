@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>falv2 — Web UI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app">
+    <!-- Навигация -->
+    <nav class="navbar">
+        <div class="nav-brand">🔍 falv2</div>
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="analyze">🔍 Анализ</button>
+            <button class="nav-tab" data-tab="results">📁 Результаты</button>
+            <button class="nav-tab" data-tab="history">📜 История</button>
+            <button class="nav-tab" data-tab="settings">⚙️ Настройки</button>
+        </div>
+    </nav>
+
+    <!-- ==================== АНАЛИЗ ==================== -->
+    <div class="tab-content active" id="tab-analyze">
+        <div class="analyze-layout">
+            <!-- Форма -->
+            <div class="analyze-form">
+                <!-- Временное окно -->
+                <fieldset>
+                    <legend>📅 Временное окно</legend>
+                    <div class="form-row-stack">
+                        <label class="radio-group">
+                            <input type="radio" name="time_mode" value="hours" checked>
+                            Последние <input type="number" id="time_hours" value="24" min="1" max="720" class="inline-num"> часов
+                        </label>
+                        <label class="radio-group">
+                            <input type="radio" name="time_mode" value="days">
+                            Последние <input type="number" id="time_days" value="1" min="1" max="30" class="inline-num"> дней
+                        </label>
+                        <label class="radio-group">
+                            <input type="radio" name="time_mode" value="exact">
+                            Точный диапазон
+                        </label>
+                    </div>
+                    <div class="form-row-stack hidden" id="exact-dates">
+                        <label>От: <input type="datetime-local" id="start_time"></label>
+                        <label>До: <input type="datetime-local" id="end_time"></label>
+                    </div>
+                </fieldset>
+
+                <!-- Режим анализа -->
+                <fieldset>
+                    <legend>🎯 Режим анализа</legend>
+                    <div class="form-row">
+                        <label class="radio-group">
+                            <input type="radio" name="analysis_mode" value="direction" checked>
+                            Direction Mode
+                        </label>
+                        <label class="radio-group">
+                            <input type="radio" name="analysis_mode" value="policyid">
+                            PolicyID Mode
+                        </label>
+                    </div>
+                </fieldset>
+
+                <!-- Направление (только Direction Mode) -->
+                <fieldset id="direction-section">
+                    <legend>🔄 Направление</legend>
+                    <div class="form-row-stack">
+                        <label class="radio-group"><input type="radio" name="direction" value="inbound"> Входящий (Inbound)</label>
+                        <label class="radio-group"><input type="radio" name="direction" value="outbound" checked> Исходящий (Outbound)</label>
+                        <label class="radio-group"><input type="radio" name="direction" value="all"> Оба направления</label>
+                    </div>
+                </fieldset>
+
+                <!-- Целевые хосты -->
+                <fieldset>
+                    <legend>🖥 Целевые хосты</legend>
+                    <div class="form-row" style="margin-bottom: 10px">
+                        <label>
+                            <input type="checkbox" id="use_machines_file" checked>
+                            Использовать файл <code>machines.txt</code>
+                        </label>
+                    </div>
+                    <div id="manual-targets">
+                        <div id="targets-list"></div>
+                        <button type="button" class="btn-add" id="add-target-btn">➕ Добавить хост</button>
+                    </div>
+                    <div class="form-row" style="margin-top: 10px">
+                        <label>
+                            <input type="checkbox" id="exclude_internal" checked>
+                            Исключать внутренние IP (internal_ips.txt)
+                        </label>
+                    </div>
+                </fieldset>
+
+                <!-- PolicyID (только PolicyID Mode) -->
+                <fieldset class="hidden" id="policyid-section">
+                    <legend>📋 Policy ID</legend>
+                    <div class="form-row">
+                        <label>Policy ID: <input type="number" id="policyid" min="1" style="width:100px"></label>
+                    </div>
+                </fieldset>
+
+                <!-- Порты -->
+                <fieldset>
+                    <legend>🔌 Фильтр по портам</legend>
+                    <div class="form-row">
+                        <label>
+                            <input type="checkbox" id="proto_enabled">
+                            Включить (--proto)
+                        </label>
+                        <input type="text" id="ports" placeholder="443, 80, 22..." style="flex:1; margin-left: 8px" disabled>
+                    </div>
+                </fieldset>
+
+                <!-- Smart Action -->
+                <fieldset>
+                    <legend>🔎 Smart Action</legend>
+                    <div class="form-row">
+                        <select id="smart_action" style="width:200px">
+                            <option value="all" selected>all — без фильтрации</option>
+                            <option value="deny">deny — только заблокированные</option>
+                            <option value="all-accept">all-accept — только принятые</option>
+                        </select>
+                    </div>
+                </fieldset>
+
+                <!-- Колонки отчёта -->
+                <fieldset>
+                    <legend>📊 Колонки отчёта</legend>
+                    <div class="columns-grid">
+                        <label><input type="checkbox" id="col_connections"> Connections</label>
+                        <label><input type="checkbox" id="col_action"> Action</label>
+                        <label><input type="checkbox" id="col_policyid" checked> PolicyID</label>
+                        <label><input type="checkbox" id="col_app" checked> App</label>
+                        <label><input type="checkbox" id="col_srcintf" checked> SrcIntf</label>
+                        <label><input type="checkbox" id="col_dstintf" checked> DstIntf</label>
+                        <label><input type="checkbox" id="col_policyname"> PolicyName</label>
+                        <label><input type="checkbox" id="col_devname"> DevName</label>
+                    </div>
+                </fieldset>
+
+                <!-- Формат вывода -->
+                <fieldset>
+                    <legend>💾 Формат вывода</legend>
+                    <div class="form-row-stack">
+                        <label><input type="radio" name="output_format" value="txt" checked> TXT (текстовый отчёт)</label>
+                        <label><input type="radio" name="output_format" value="csv"> CSV (таблица)</label>
+                        <label><input type="radio" name="output_format" value="both"> TXT + CSV (оба файла)</label>
+                    </div>
+                </fieldset>
+
+                <div class="run-buttons">
+                    <button class="btn-run" id="run-btn">▶ Запустить анализ</button>
+                    <button class="btn-stop-inline" id="stop-btn">⏹ Остановить</button>
+                </div>
+            </div>
+
+            <!-- Прогресс и результат -->
+            <div class="analyze-output">
+                <div id="progress-panel" class="hidden">
+                    <div class="progress-header">⏳ Выполняется...</div>
+                    <div id="progress-log" class="progress-log"></div>
+                </div>
+                <div id="result-panel" class="hidden">
+                    <div id="result-tabs" class="result-tabs"></div>
+                    <pre id="result-content" class="result-content"></pre>
+                    <div class="result-actions">
+                        <button class="btn-copy" id="copy-btn">📋 Копировать</button>
+                        <button class="btn-download" id="download-btn">📥 Скачать</button>
+                    </div>
+                </div>
+                <div id="idle-panel">
+                    <div class="idle-msg">Настройте параметры и нажмите «Запустить анализ»</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== РЕЗУЛЬТАТЫ ==================== -->
+    <div class="tab-content" id="tab-results">
+        <div class="results-header">
+            <h2>📁 Результаты</h2>
+            <button class="btn-open-folder" id="open-folder-btn">📂 Открыть папку</button>
+        </div>
+        <table class="results-table" id="results-table">
+            <thead>
+                <tr>
+                    <th>Имя файла</th>
+                    <th>Дата изменения</th>
+                    <th>Размер</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="results-tbody"></tbody>
+        </table>
+        <div id="results-empty" class="hidden">Нет сохранённых результатов</div>
+    </div>
+
+    <!-- ==================== ИСТОРИЯ ==================== -->
+    <div class="tab-content" id="tab-history">
+        <h2>📜 История запросов</h2>
+        <table class="history-table" id="history-table">
+            <thead>
+                <tr>
+                    <th>Дата</th>
+                    <th>Тип</th>
+                    <th>Направление</th>
+                    <th>Время</th>
+                    <th>Файл целей</th>
+                    <th>Исключения</th>
+                    <th>Smart Action</th>
+                    <th>Файл результата</th>
+                    <th>Итог</th>
+                </tr>
+            </thead>
+            <tbody id="history-tbody"></tbody>
+        </table>
+        <div id="history-empty" class="hidden">История запросов пуста</div>
+    </div>
+
+    <!-- ==================== НАСТРОЙКИ ==================== -->
+    <div class="tab-content" id="tab-settings">
+        <h2>⚙️ Настройки</h2>
+        <form id="settings-form">
+            <fieldset>
+                <legend>🔐 Подключение к FortiAnalyzer</legend>
+                <div class="form-row">
+                    <label>URL: <input type="text" id="set_faz_url" style="flex:1"></label>
+                </div>
+                <div class="form-row">
+                    <label>Логин: <input type="text" id="set_faz_username" style="width:200px"></label>
+                </div>
+                <div class="form-row">
+                    <label>Пароль: <input type="password" id="set_faz_password" style="width:200px"></label>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>⚡ Производительность</legend>
+                <div class="form-row-stack">
+                    <label>Batch size: <input type="number" id="set_batch_size" min="10" max="1000" class="inline-num"></label>
+                    <label>Max task hours: <input type="number" id="set_max_task_hours" min="0" max="24" class="inline-num"></label>
+                    <label>Max matched logs: <input type="number" id="set_max_matched_logs" min="0" class="inline-num"></label>
+                    <label>Max workers: <input type="number" id="set_max_workers" min="1" max="10" value="1" class="inline-num"></label>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>📁 Результаты</legend>
+                <div class="form-row">
+                    <label>Директория: <input type="text" id="set_results_dir" style="flex:1"></label>
+                </div>
+            </fieldset>
+
+            <button type="submit" class="btn-save">💾 Сохранить настройки</button>
+            <span id="settings-status" class="settings-status"></span>
+        </form>
+    </div>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>

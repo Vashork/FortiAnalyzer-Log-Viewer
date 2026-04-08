@@ -119,6 +119,8 @@ class LogAnalyzer:
 
             if log.get("smart_action"):
                 entry["actions"].add(log["smart_action"])
+            elif log.get("action"):
+                entry["actions"].add(log["action"])
             if log.get("policyid") is not None:
                 entry["policyids"].add(str(log["policyid"]))
             if log.get("app"):
