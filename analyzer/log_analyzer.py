@@ -123,8 +123,11 @@ class LogAnalyzer:
                 entry["actions"].add(log["smart_action"])
             elif log.get("action"):
                 entry["actions"].add(log["action"])
-            if log.get("smart_action"):
-                entry["smart_actions"].add(log["smart_action"])
+            # Smart Action: derive from FAZ raw fields
+            # Priority: smart_action > utmaction > action
+            sa = log.get("smart_action") or log.get("utmaction") or log.get("utm_action") or log.get("action") or log.get("utm_result")
+            if sa:
+                entry["smart_actions"].add(str(sa))
             if log.get("policyid") is not None:
                 entry["policyids"].add(str(log["policyid"]))
             if log.get("app"):
@@ -259,9 +262,12 @@ class LogAnalyzer:
             entry = result[key]
             entry["count"] += 1
 
-            if log.get("smart_action"):
-                entry["actions"].add(log["smart_action"])
-                entry["smart_actions"].add(log["smart_action"])
+            # Smart Action: derive from FAZ raw fields
+            # Priority: smart_action > utmaction > action
+            sa = log.get("smart_action") or log.get("utmaction") or log.get("utm_action") or log.get("action") or log.get("utm_result")
+            if sa:
+                entry["actions"].add(str(sa))
+                entry["smart_actions"].add(str(sa))
             if log.get("app"):
                 entry["apps"].add(log["app"])
             if log.get("srcintf"):

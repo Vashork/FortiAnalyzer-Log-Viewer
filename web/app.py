@@ -427,6 +427,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
 
                     def process_ip(ip, direction):
+                        progress(f"▶ Starting: {ip} [{direction}]")
                         report_dict = _faz_search_wrapper(
                             progress=progress,
                             faz_url=os.getenv("FORTIANALYZER_URL"),
@@ -447,6 +448,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                                         if ip not in per_ip_results:
                                             per_ip_results[ip] = {}
                                         per_ip_results[ip][dir_key] = txt
+                        progress(f"✓ Done: {ip} [{direction}]")
                         return direction_text[dir_key] if direction else []
 
                     futures_map = {}
@@ -464,9 +466,9 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                             progress(f"Error for {ip}: {e}")
                 else:
                     for direction in directions:
-                        progress(f"Processing direction: {direction}")
+                        progress(f"▶ Direction: {direction}")
                         for ip in target_ips:
-                            progress(f"  IP: {ip}")
+                            progress(f"  ▶ Starting: {ip}")
                             report_dict = _faz_search_wrapper(
                                 progress=progress,
                                 faz_url=os.getenv("FORTIANALYZER_URL"),
@@ -481,6 +483,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                             for (_, dir_key), txt in (report_dict or {}).items():
                                 if txt.strip():
                                     direction_text[dir_key].append(txt)
+                            progress(f"  ✓ Done: {ip}")
 
                 all_files = []
                 all_texts = {}
@@ -583,7 +586,20 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
     def patched_wait(task_id, max_wait=300):
         start_ts = time.time()
         last_progress_val = -1
+        last_poll_ts = 0
+        poll_interval = 1  # опрашиваем каждую секунду для плавного SSE
+
+        # Первое сообщение — сразу после создания таска
+        progress(f"{prefix}Waiting for FAZ to process search task...")
+
         while time.time() - start_ts < max_wait:
+            # Шлём "heartbeat" каждые poll_interval секунд даже если прогресс не изменился
+            now = time.time()
+            if now - last_poll_ts < poll_interval:
+                time.sleep(0.3)
+                continue
+            last_poll_ts = now
+
             payload = {
                 "id": "123456789", "jsonrpc": "2.0", "method": "get",
                 "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
@@ -595,22 +611,29 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
                 status_code = raw.get("status", {}).get("code", -1)
                 matched = raw.get("matched-logs", 0)
                 prog = raw.get("progress-percent", 0)
+
                 if prog != last_progress_val:
                     progress(f"{prefix}Progress: {prog}%")
                     last_progress_val = prog
+                else:
+                    # heartbeat — показать, что мы всё ещё ждём
+                    progress(f"{prefix}Waiting... {prog}% | matched: {matched}")
+
                 if status_code == 0 and prog == 100:
-                    progress(f"{prefix}Task completed. Found {matched} logs")
+                    progress(f"{prefix}✅ Task completed. Found {matched} logs")
                     return True, matched
                 if status_code in (0, 1):
-                    time.sleep(5)
                     continue
+                progress(f"{prefix}⚠ Task failed with status code: {status_code}")
                 return False, 0
-            except Exception:
-                time.sleep(5)
+            except Exception as e:
+                progress(f"{prefix}⚠ Status check error, retrying: {e}")
+                time.sleep(3)
+        progress(f"{prefix}⚠ Task did not complete within allowed time")
         return False, 0
 
     def patched_fetch(task_id, total, batch=100):
-        progress(f"{prefix}Fetching logs (matched={total}, batch={batch})...")
+        progress(f"{prefix}📥 Fetching logs (matched={total}, batch={batch})...")
         all_logs = []
         offset = 0
         while offset < total:
@@ -629,7 +652,8 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
                 break
             all_logs.extend(data)
             offset += len(data)
-            progress(f"{prefix}Fetched {len(all_logs)}/{total} logs")
+            pct = int(offset / total * 100) if total else 100
+            progress(f"{prefix}📥 Fetched {len(all_logs)}/{total} logs ({pct}%)")
         return all_logs
 
     client.create_search_task = patched_create
