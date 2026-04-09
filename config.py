@@ -71,6 +71,7 @@ COLUMNS_CONFIG = {
     "dstintf": _get_bool("COLUMN_DSTINTF", "false"),
     "policyname": _get_bool("COLUMN_POLICYNAME", "false"),
     "devname": _get_bool("COLUMN_DEVNAME", "false"),
+    "smart_action": _get_bool("COLUMN_SMART_ACTION", "false"),
 }
 
 # Максимальная длительность одного FAZ-search task в часах.

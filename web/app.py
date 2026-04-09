@@ -389,76 +389,65 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
             if request.analysis_mode == "policyid" and request.policyid is not None:
                 progress(f"PolicyID mode: policyid={request.policyid}")
-                client = FortiAnalyzerClient(
-                    url=os.getenv("FORTIANALYZER_URL"),
-                    username=os.getenv("FORTIANALYZER_USERNAME"),
-                    password=os.getenv("FORTIANALYZER_PASSWORD"),
+                text = _faz_search_wrapper(
+                    progress=progress,
+                    faz_url=os.getenv("FORTIANALYZER_URL"),
+                    faz_user=os.getenv("FORTIANALYZER_USERNAME"),
+                    faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
+                    target_ips=target_ips,
+                    exclude_ips=list(exclude_ips),
+                    start_time=start_time, end_time=end_time,
+                    batch_size=get_dynamic_batch_size(), ports=ports,
+                    policyid=request.policyid, columns=request.columns,
                 )
-                if not client.login():
+                if text is None:
                     error("FAZ login failed")
                     return
+                if not str(text).strip():
+                    text = "NO DATA\n"
+                text = str(text)
 
-                try:
-                    _patch_faz_for_sse(client, progress)
-                    text = analyze_policyid_logs(
-                        client=client, target_ips=target_ips, policyid=request.policyid,
-                        start_time=start_time, end_time=end_time, exclude_ips=list(exclude_ips),
-                        batch_size=get_dynamic_batch_size(), ports=ports,
-                    )
-                    if not text.strip():
-                        text = "NO DATA\n"
-
-                    outfile = results_dir / f"policy_{request.policyid}.txt"
-                    from utils.output import save_results
-                    save_results(text, outfile)
-                    append_history_simple(text, start_time, end_time, f"policyid={request.policyid}", outfile.name)
-
-                    result_files = [{"name": outfile.name, "path": outfile.name}]
-                    result_data = {"txt": text}
-
-                    if request.output_format in ("csv", "both"):
-                        csv_text = text_to_csv(text)
-                        csv_file = results_dir / f"policy_{request.policyid}.csv"
-                        csv_file.write_text(csv_text, encoding="utf-8")
-                        result_files.append({"name": csv_file.name, "path": csv_file.name})
-                        result_data["csv"] = csv_text
-
-                    done({"files": result_files, "texts": result_data})
-                finally:
-                    client.logout()
+                _save_result(text, progress, results_dir, f"policy_{request.policyid}",
+                               start_time, end_time, f"policyid={request.policyid}",
+                               request.output_format)
+                done({"files": [{"name": f"policy_{request.policyid}.txt", "path": f"policy_{request.policyid}.txt"}],
+                      "texts": {"txt": text}})
             else:
                 directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
                 workers = request.workers or get_dynamic_workers()
 
                 direction_text = {d: [] for d in directions}
+                per_ip_results = {}
 
                 if workers > 1 and len(target_ips) > 1:
                     from concurrent.futures import ThreadPoolExecutor, as_completed
+                    import threading
+                    _ip_lock = threading.Lock()
                     progress(f"Parallel mode: {workers} workers, {len(target_ips)} IPs")
 
+
                     def process_ip(ip, direction):
-                        local_results = []
-                        client_ip = FortiAnalyzerClient(
-                            url=os.getenv("FORTIANALYZER_URL"),
-                            username=os.getenv("FORTIANALYZER_USERNAME"),
-                            password=os.getenv("FORTIANALYZER_PASSWORD"),
+                        report_dict = _faz_search_wrapper(
+                            progress=progress,
+                            faz_url=os.getenv("FORTIANALYZER_URL"),
+                            faz_user=os.getenv("FORTIANALYZER_USERNAME"),
+                            faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
+                            target_ips=[ip],
+                            exclude_ips=list(exclude_ips),
+                            start_time=start_time, end_time=end_time,
+                            batch_size=get_dynamic_batch_size(), ports=ports,
+                            direction=direction, columns=request.columns,
                         )
-                        if not client_ip.login():
-                            progress(f"[{ip}] Login failed")
-                            return local_results
-                        try:
-                            _patch_faz_for_sse(client_ip, progress, ip_label=ip)
-                            report_dict = analyze_logs(
-                                client=client_ip, target_ips=[ip], direction=direction,
-                                start_time=start_time, end_time=end_time, exclude_ips=list(exclude_ips),
-                                batch_size=get_dynamic_batch_size(), ports=ports,
-                            )
+                        if report_dict:
                             for (_, dir_key), txt in (report_dict or {}).items():
                                 if txt.strip():
-                                    local_results.append((dir_key, txt))
-                        finally:
-                            client_ip.logout()
-                        return local_results
+                                    direction_text[dir_key].append(txt)
+                                    # Сохраняем per-IP результат (thread-safe)
+                                    with _ip_lock:
+                                        if ip not in per_ip_results:
+                                            per_ip_results[ip] = {}
+                                        per_ip_results[ip][dir_key] = txt
+                        return direction_text[dir_key] if direction else []
 
                     futures_map = {}
                     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -470,58 +459,43 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                     for future in as_completed(futures_map):
                         ip, direction = futures_map[future]
                         try:
-                            results = future.result()
-                            for dir_key, txt in results:
-                                direction_text[dir_key].append(txt)
+                            future.result()  # результаты уже добавлены в direction_text и per_ip_results
                         except Exception as e:
                             progress(f"Error for {ip}: {e}")
                 else:
                     for direction in directions:
                         progress(f"Processing direction: {direction}")
-                        client = FortiAnalyzerClient(
-                            url=os.getenv("FORTIANALYZER_URL"),
-                            username=os.getenv("FORTIANALYZER_USERNAME"),
-                            password=os.getenv("FORTIANALYZER_PASSWORD"),
-                        )
-                        if not client.login():
-                            error(f"FAZ login failed for {direction}")
-                            continue
-                        try:
-                            _patch_faz_for_sse(client, progress)
-                            for ip in target_ips:
-                                progress(f"  IP: {ip}")
-                                report_dict = analyze_logs(
-                                    client=client, target_ips=[ip], direction=direction,
-                                    start_time=start_time, end_time=end_time, exclude_ips=list(exclude_ips),
-                                    batch_size=get_dynamic_batch_size(), ports=ports,
-                                )
-                                for (_, dir_key), txt in (report_dict or {}).items():
-                                    if txt.strip():
-                                        direction_text[dir_key].append(txt)
-                        finally:
-                            client.logout()
+                        for ip in target_ips:
+                            progress(f"  IP: {ip}")
+                            report_dict = _faz_search_wrapper(
+                                progress=progress,
+                                faz_url=os.getenv("FORTIANALYZER_URL"),
+                                faz_user=os.getenv("FORTIANALYZER_USERNAME"),
+                                faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
+                                target_ips=[ip],
+                                exclude_ips=list(exclude_ips),
+                                start_time=start_time, end_time=end_time,
+                                batch_size=get_dynamic_batch_size(), ports=ports,
+                                direction=direction,
+                            )
+                            for (_, dir_key), txt in (report_dict or {}).items():
+                                if txt.strip():
+                                    direction_text[dir_key].append(txt)
 
-                files = []
-                result_texts = {}
-
+                all_files = []
+                all_texts = {}
                 for direction in directions:
-                    outfile = results_dir / f"{direction}.txt"
                     final_text = "\n\n".join(direction_text[direction]) if direction_text[direction] else "NO DATA\n"
-
-                    from utils.output import save_results
-                    save_results(final_text, outfile)
-                    append_history_simple(final_text, start_time, end_time, f"direction={direction}", outfile.name)
-                    files.append({"name": outfile.name, "path": outfile.name})
-                    result_texts[f"{direction}.txt"] = final_text
-
-                    if request.output_format in ("csv", "both"):
-                        csv_text = text_to_csv(final_text)
-                        csv_file = results_dir / f"{direction}.csv"
-                        csv_file.write_text(csv_text, encoding="utf-8")
-                        files.append({"name": csv_file.name, "path": csv_file.name})
-                        result_texts[f"{direction}.csv"] = csv_text
-
-                done({"files": files, "texts": result_texts})
+                    files, texts = _save_result(final_text, progress, results_dir, direction,
+                                   start_time, end_time, f"direction={direction}",
+                                   request.output_format)
+                    all_files.extend(files)
+                    all_texts.update(texts)
+                # Only include per_ip if we actually have per-IP results (parallel mode)
+                # Send per_ip only if parallel mode populated it with actual data
+                if per_ip_results and len(per_ip_results) >= 1 and all(len(v) > 0 for v in per_ip_results.values()):
+                    all_texts["per_ip"] = per_ip_results
+                done({"files": all_files, "texts": all_texts})
 
         except Exception as e:
             import traceback
@@ -530,6 +504,64 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
+
+
+def _save_result(text, progress, results_dir, name_prefix,
+                   start_time, end_time, cmd_label, output_format):
+    """Сохраняет результат (txt + опционально csv), пишет историю, шлёт done."""
+    from utils.output import save_results
+
+    files = []
+    result_data = {}
+
+    txt_file = results_dir / f"{name_prefix}.txt"
+    save_results(text, txt_file)
+    append_history_simple(text, start_time, end_time, cmd_label, txt_file.name)
+    files.append({"name": txt_file.name, "path": txt_file.name})
+    result_data["txt"] = text
+
+    if output_format in ("csv", "both"):
+        csv_text = text_to_csv(text)
+        csv_file = results_dir / f"{name_prefix}.csv"
+        csv_file.write_text(csv_text, encoding="utf-8")
+        files.append({"name": csv_file.name, "path": csv_file.name})
+        result_data["csv"] = csv_text
+
+    return files, result_data
+
+
+def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
+                        target_ips, exclude_ips, start_time, end_time,
+                        batch_size, ports, direction=None, policyid=None, columns=None):
+    """
+    Общий паттерн FAZ search: login → patch → analyze → logout.
+    direction — для direction mode, policyid — для policyid mode.
+    Возвращает (text или dict с результатами).
+    """
+    client = FortiAnalyzerClient(
+        url=faz_url, username=faz_user, password=faz_pass,
+    )
+    if not client.login():
+        return None
+    try:
+        ip_label = target_ips[0] if target_ips and direction else ""
+        _patch_faz_for_sse(client, progress, ip_label=ip_label)
+
+        if policyid is not None:
+            return analyze_policyid_logs(
+                client=client, target_ips=target_ips, policyid=policyid,
+                start_time=start_time, end_time=end_time, exclude_ips=exclude_ips,
+                batch_size=batch_size, ports=ports, columns=columns,
+            )
+        else:
+            return analyze_logs(
+                client=client, target_ips=target_ips, direction=direction,
+                start_time=start_time, end_time=end_time, exclude_ips=exclude_ips,
+                batch_size=batch_size, ports=ports, columns=columns,
+            )
+    finally:
+        client.logout()
+
 
 
 def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):

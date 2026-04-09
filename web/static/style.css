@@ -523,6 +523,46 @@ input:focus, select:focus {
     font-size: 0.9rem;
 }
 
+
+/* ========================
+   WORKER GRID (multi-IP)
+   ======================== */
+
+.worker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.worker-card {
+    border: 2px solid #0f3460;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+}
+
+.worker-card-header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 8px 14px;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.worker-card-content {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.78rem;
+    padding: 10px;
+    margin: 0;
+    max-height: 400px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 /* ========================
    АДАПТИВНОСТЬ
    ======================== */

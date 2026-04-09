@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>falv2 — Web UI</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
 
@@ -31,7 +31,7 @@
                     <div class="form-row-stack">
                         <label class="radio-group">
                             <input type="radio" name="time_mode" value="hours" checked>
-                            Последние <input type="number" id="time_hours" value="24" min="1" max="720" class="inline-num"> часов
+                            Последние <input type="number" id="time_hours" value="1" min="1" max="720" class="inline-num"> часов
                         </label>
                         <label class="radio-group">
                             <input type="radio" name="time_mode" value="days">
@@ -78,7 +78,7 @@
                     <legend>🖥 Целевые хосты</legend>
                     <div class="form-row" style="margin-bottom: 10px">
                         <label>
-                            <input type="checkbox" id="use_machines_file" checked>
+                            <input type="checkbox" id="use_machines_file">
                             Использовать файл <code>machines.txt</code>
                         </label>
                     </div>
@@ -138,6 +138,7 @@
                         <label><input type="checkbox" id="col_dstintf" checked> DstIntf</label>
                         <label><input type="checkbox" id="col_policyname"> PolicyName</label>
                         <label><input type="checkbox" id="col_devname"> DevName</label>
+                        <label><input type="checkbox" id="col_smart_action"> Smart Action</label>
                     </div>
                 </fieldset>
 
@@ -260,6 +261,6 @@
     </div>
 </div>
 
-<script src="/static/script.js"></script>
+<script src="/static/script.js?v=2"></script>
 </body>
 </html>

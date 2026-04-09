@@ -68,8 +68,9 @@ def split_time_range_safe(start_time: str, end_time: str, max_hours: int):
 class LogAnalyzer:
     """Aggregates logs into structured reports."""
 
-    def __init__(self, exclude_ips: List[str]):
+    def __init__(self, exclude_ips: List[str], columns: dict = None):
         self.exclude_ips = set(exclude_ips)
+        self.columns = columns if columns is not None else COLUMNS_CONFIG
 
     # ----------------------------------------------------------
     # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
@@ -95,6 +96,7 @@ class LogAnalyzer:
                     "dstintfs": set(),
                     "policynames": set(),
                     "devnames": set(),
+                    "smart_actions": set(),
                 }
             )
         )
@@ -121,6 +123,8 @@ class LogAnalyzer:
                 entry["actions"].add(log["smart_action"])
             elif log.get("action"):
                 entry["actions"].add(log["action"])
+            if log.get("smart_action"):
+                entry["smart_actions"].add(log["smart_action"])
             if log.get("policyid") is not None:
                 entry["policyids"].add(str(log["policyid"]))
             if log.get("app"):
@@ -141,23 +145,25 @@ class LogAnalyzer:
     # ----------------------------------------------------------
     def build_reports_per_local(self, stats, direction: str, target_ips: List[str]):
         reports: Dict[Tuple[str, str], str] = {}
-        show_connections = COLUMNS_CONFIG.get("connections", True)
+        show_connections = self.columns.get("connections", True)
 
         extra_cols = []
-        if COLUMNS_CONFIG.get("action"):
+        if self.columns.get("action"):
             extra_cols.append(("Action", "actions"))
-        if COLUMNS_CONFIG.get("policyid"):
+        if self.columns.get("policyid"):
             extra_cols.append(("PolicyID", "policyids"))
-        if COLUMNS_CONFIG.get("app"):
+        if self.columns.get("app"):
             extra_cols.append(("App", "apps"))
-        if COLUMNS_CONFIG.get("srcintf"):
+        if self.columns.get("srcintf"):
             extra_cols.append(("SrcIntf", "srcintfs"))
-        if COLUMNS_CONFIG.get("dstintf"):
+        if self.columns.get("dstintf"):
             extra_cols.append(("DstIntf", "dstintfs"))
-        if COLUMNS_CONFIG.get("policyname"):
+        if self.columns.get("policyname"):
             extra_cols.append(("PolicyName", "policynames"))
-        if COLUMNS_CONFIG.get("devname"):
+        if self.columns.get("devname"):
             extra_cols.append(("DevName", "devnames"))
+        if self.columns.get("smart_action"):
+            extra_cols.append(("SmartAction", "smart_actions"))
 
         for local_ip, items in stats.items():
             lines = [
@@ -229,6 +235,7 @@ class LogAnalyzer:
                 "dstintfs": set(),
                 "policynames": set(),
                 "devnames": set(),
+                "smart_actions": set(),
             }
         )
 
@@ -254,6 +261,7 @@ class LogAnalyzer:
 
             if log.get("smart_action"):
                 entry["actions"].add(log["smart_action"])
+                entry["smart_actions"].add(log["smart_action"])
             if log.get("app"):
                 entry["apps"].add(log["app"])
             if log.get("srcintf"):
@@ -271,21 +279,23 @@ class LogAnalyzer:
         if not stats:
             return ""
 
-        show_connections = COLUMNS_CONFIG.get("connections", True)
+        show_connections = self.columns.get("connections", True)
 
         extra_cols = []
-        if COLUMNS_CONFIG.get("action"):
+        if self.columns.get("action"):
             extra_cols.append(("Action", "actions"))
-        if COLUMNS_CONFIG.get("app"):
+        if self.columns.get("app"):
             extra_cols.append(("App", "apps"))
-        if COLUMNS_CONFIG.get("srcintf"):
+        if self.columns.get("srcintf"):
             extra_cols.append(("SrcIntf", "srcintfs"))
-        if COLUMNS_CONFIG.get("dstintf"):
+        if self.columns.get("dstintf"):
             extra_cols.append(("DstIntf", "dstintfs"))
-        if COLUMNS_CONFIG.get("policyname"):
+        if self.columns.get("policyname"):
             extra_cols.append(("PolicyName", "policynames"))
-        if COLUMNS_CONFIG.get("devname"):
+        if self.columns.get("devname"):
             extra_cols.append(("DevName", "devnames"))
+        if self.columns.get("smart_action"):
+            extra_cols.append(("SmartAction", "smart_actions"))
 
         lines = [
             "=" * 110,
@@ -426,6 +436,7 @@ def analyze_logs(
         exclude_ips,
         batch_size=100,
         ports=None,
+        columns=None,
 ):
     filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
 
@@ -460,7 +471,7 @@ def analyze_logs(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns)
     stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
     return analyzer.build_reports_per_local(stats, direction, target_ips)
 
@@ -477,6 +488,7 @@ def analyze_policyid_logs(
         exclude_ips,
         batch_size=100,
         ports=None,
+        columns=None,
 ):
     filter_str = build_policy_faz_filter(policyid, target_ips, ports)
 
@@ -511,6 +523,6 @@ def analyze_policyid_logs(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns)
     stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
     return analyzer.build_policyid_report(stats, policyid)
