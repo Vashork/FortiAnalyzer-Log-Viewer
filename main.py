@@ -6,31 +6,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
+import os
+from dotenv import load_dotenv
+
 from config import (
     RESULTS_DIR,
     BATCH_SIZE,
     MAX_WORKERS,
     DEFAULT_TIME_RANGE_HOURS,
     validate_config,
-    FORTIANALYZER_URL,
-    FORTIANALYZER_USERNAME,
-    FORTIANALYZER_PASSWORD,
-    SMART_ACTION,
-    FILTER_MODE,
+    reload_env,
 )
+
+load_dotenv()
 
 from utils.network import load_machines, load_ports
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
 from utils.output import save_results
 
-load_dotenv()
 
 
 # ----------------------------------------------------
 # HISTORY
 # ----------------------------------------------------
-def append_history(text: str, start_time: str, end_time: str, cmd: str):
+def _append_history(text: str, start_time: str, end_time: str, cmd: str, filename: str):
     history_path = Path(RESULTS_DIR) / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -38,7 +38,8 @@ def append_history(text: str, start_time: str, end_time: str, cmd: str):
         f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n"
         f"CMD: {cmd}\n"
         f"TIME: {start_time} → {end_time}\n"
-        f"SMART_ACTION={SMART_ACTION} | FILTER_MODE={FILTER_MODE}\n"
+        f"SMART_ACTION={os.getenv("SMART_ACTION", "all")} | FILTER_MODE={os.getenv("FILTER_MODE", "faz")}\n"
+        f"FILE: {filename}\n"
         f"{'-'*60}\n"
     )
 
@@ -52,9 +53,9 @@ def append_history(text: str, start_time: str, end_time: str, cmd: str):
 # ----------------------------------------------------
 def process_single_ip(ip, direction, start_time, end_time, exclude_ips, ports):
     client = FortiAnalyzerClient(
-        url=FORTIANALYZER_URL,
-        username=FORTIANALYZER_USERNAME,
-        password=FORTIANALYZER_PASSWORD,
+        url=os.getenv("FORTIANALYZER_URL"),
+        username=os.getenv("FORTIANALYZER_USERNAME"),
+        password=os.getenv("FORTIANALYZER_PASSWORD"),
     )
 
     if not client.login():
@@ -121,9 +122,9 @@ def main():
     # ================= POLICY MODE =================
     if args.policyid is not None:
         client = FortiAnalyzerClient(
-            url=FORTIANALYZER_URL,
-            username=FORTIANALYZER_USERNAME,
-            password=FORTIANALYZER_PASSWORD,
+            url=os.getenv("FORTIANALYZER_URL"),
+            username=os.getenv("FORTIANALYZER_USERNAME"),
+            password=os.getenv("FORTIANALYZER_PASSWORD"),
         )
 
         if not client.login():
@@ -149,7 +150,7 @@ def main():
 
         outfile = results_dir / f"policy_{args.policyid}.txt"
         save_results(text, outfile)
-        append_history(text, start_time, end_time, cmd)
+        _append_history(text, start_time, end_time, cmd, outfile.name)
 
         print(f"💾 Saved: {outfile}")
         return
@@ -194,7 +195,7 @@ def main():
             final_text = "NO DATA\n"
 
         save_results(final_text, outfile)
-        append_history(final_text, start_time, end_time, cmd)
+        _append_history(final_text, start_time, end_time, cmd, outfile.name)
 
         print(f"💾 Saved: {outfile}")
 

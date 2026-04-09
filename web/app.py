@@ -228,6 +228,15 @@ def parse_history() -> List[dict]:
     return list(reversed(entries))
 
 
+def _sanitize_env_value(val: str) -> str:
+    """Экранирует спецсимволы для безопасной записи в .env."""
+    val = val.replace("\n", "").replace("\r", "")
+    # Если значение содержит #, =, пробелы или кавычки — оборачиваем в кавычки
+    if any(c in val for c in ("#", "=", " ", '"', "'")):
+        val = '"' + val.replace('"', '\\"') + '"'
+    return val
+
+
 def update_env_file(updates: dict):
     env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
@@ -244,7 +253,7 @@ def update_env_file(updates: dict):
 
         key = stripped.split("=")[0]
         if key in updates:
-            val = updates[key]
+            val = _sanitize_env_value(str(updates[key]))
             comment = ""
             if "#" in line:
                 comment = "  " + line.split("#", 1)[1]
@@ -311,20 +320,23 @@ def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, f
 # SSE РїСЂРѕРіСЂРµСЃСЃ
 # ========================
 
-_progress_queue = asyncio.Queue()
+_analyze_semaphore = asyncio.Semaphore(2)
+_progress_queues: dict[str, asyncio.Queue] = {}
 
 
-async def run_analysis_in_thread(request: AnalysisRequest):
+async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     loop = asyncio.get_event_loop()
+    queue = asyncio.Queue()
+    _progress_queues[request_id] = queue
 
     def progress(msg: str):
-        loop.call_soon_threadsafe(_progress_queue.put_nowait, {"type": "progress", "message": msg})
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "message": msg})
 
     def done(result: dict):
-        loop.call_soon_threadsafe(_progress_queue.put_nowait, {"type": "done", "result": result})
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
 
     def error(msg: str):
-        loop.call_soon_threadsafe(_progress_queue.put_nowait, {"type": "error", "message": msg})
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg})
 
     def run():
         try:
@@ -627,16 +639,26 @@ async def index():
 @app.post("/api/analyze/stream")
 async def analyze_stream(request: AnalysisRequest):
     validate_config()
-    while not _progress_queue.empty():
-        await _progress_queue.get()
-    await run_analysis_in_thread(request)
+
+    # Rate limiting
+    if _analyze_semaphore.locked():
+        raise HTTPException(status_code=429, detail="Too many concurrent analyses (max 2)")
+
+    import uuid
+    request_id = str(uuid.uuid4())
+
+    async with _analyze_semaphore:
+        await run_analysis_in_thread(request, request_id)
+        queue = _progress_queues.get(request_id, asyncio.Queue())
 
     async def event_generator():
         while True:
             try:
-                event = await asyncio.wait_for(_progress_queue.get(), timeout=120)
+                event = await asyncio.wait_for(queue.get(), timeout=120)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event.get("type") in ("done", "error"):
+                    # Cleanup
+                    _progress_queues.pop(request_id, None)
                     break
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type': 'timeout'}, ensure_ascii=False)}\n\n"

@@ -1,3 +1,5 @@
+import os
+
 import time
 from typing import Optional, List, Dict, Tuple
 
@@ -5,6 +7,8 @@ import requests
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+from config import EMPTY_BATCH_LIMIT
 
 
 class FortiAnalyzerClient:
@@ -178,7 +182,7 @@ class FortiAnalyzerClient:
         all_logs: List[Dict] = []
         offset = 0
 
-        MAX_EMPTY_RETRIES = 10
+        
         MAX_INCOMPLETE_RETRIES = 3
 
         print(f"📥 Fetching logs (matched={total_logs}, batch={batch_size})...")
@@ -211,8 +215,8 @@ class FortiAnalyzerClient:
 
                     except Exception as e:
                         empty_retry += 1
-                        if empty_retry <= MAX_EMPTY_RETRIES:
-                            print(f"✗ Error at offset {offset}, retrying ({empty_retry}/{MAX_EMPTY_RETRIES}): {e}")
+                        if empty_retry <= EMPTY_BATCH_LIMIT:
+                            print(f"✗ Error at offset {offset}, retrying ({empty_retry}/{EMPTY_BATCH_LIMIT}): {e}")
                             time.sleep(3)
                             continue
                         print(f"✗ Max retries reached at offset {offset}")
@@ -220,11 +224,11 @@ class FortiAnalyzerClient:
 
                     if not data:
                         empty_retry += 1
-                        if empty_retry <= MAX_EMPTY_RETRIES:
-                            print(f"⚠️ Empty data received at offset {offset}, retrying ({empty_retry}/{MAX_EMPTY_RETRIES})...")
+                        if empty_retry <= EMPTY_BATCH_LIMIT:
+                            print(f"⚠️ Empty data received at offset {offset}, retrying ({empty_retry}/{EMPTY_BATCH_LIMIT})...")
                             time.sleep(3)
                             continue
-                        print(f"⚠️ No data at offset {offset} after {MAX_EMPTY_RETRIES} retries.")
+                        print(f"⚠️ No data at offset {offset} after {EMPTY_BATCH_LIMIT} retries.")
                         return all_logs
 
                     if len(data) < batch_size and (total_logs - offset) > len(data):
