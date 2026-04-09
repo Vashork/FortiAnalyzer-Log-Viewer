@@ -401,7 +401,13 @@ function handleEvent(ev) {
         dirKeys.forEach(dir => {
             const btn = document.createElement('button');
             btn.className = 'result-tab-btn';
-            const label = dir.endsWith('.csv') ? dir.replace('.csv', '') : dir.replace('.txt', '');
+            let label = dir;
+            // Убираем расширение и префикс направления для читаемости
+            if (label.endsWith('.csv')) {
+                label = label.replace('.csv', '') + ' (CSV)';
+            } else if (label.endsWith('.txt')) {
+                label = label.replace('.txt', '') + ' (TXT)';
+            }
             btn.textContent = '📄 ' + label.charAt(0).toUpperCase() + label.slice(1);
             btn.onclick = () => {
                 document.querySelectorAll('.result-tab-btn').forEach(b => b.classList.remove('active'));
@@ -533,9 +539,198 @@ async function loadMainHistory() {
             const sum = e.summary_lines && e.summary_lines.length ? e.summary_lines.join(' · ') : '—';
             const tr = document.createElement('tr');
             tr.innerHTML = '<td style="font-size:0.78rem">' + e.timestamp + '</td><td><span class="type-badge">' + type + '</span></td><td>' + dir + '</td><td style="font-size:0.75rem">' + e.time_range + '</td><td>' + sum + '</td>';
+            
+            // Добавляем класс для кликабельности
+            tr.classList.add('history-clickable-row');
+            
+            if (e.state) {
+                // Новый формат — полное состояние
+                tr.setAttribute('data-state', JSON.stringify(e.state));
+                tr.addEventListener('click', () => restoreFormState(e.state));
+            } else {
+                // Старый формат — fallback по CMD
+                tr.title = 'Нажмите, чтобы восстановить параметры (частично)';
+                tr.addEventListener('click', () => {
+                    restoreFormStateFromCmd(e.cmd, e.time_range, e.smart_action, e.has_policy, e.has_inbound, e.has_outbound, e.direction, e.policyid);
+                });
+            }
+            
             tbody.appendChild(tr);
         });
     } catch (err) { console.error(err); }
+}
+
+// ---- Restore form state from history ----
+function restoreFormState(state) {
+    if (!state) return;
+    
+    // Время
+    if (state.time_mode) {
+        document.getElementById('time_mode_select').value = state.time_mode;
+        const isExact = state.time_mode === 'exact';
+        document.getElementById('exact_from').classList.toggle('hidden', !isExact);
+        document.getElementById('exact_to').classList.toggle('hidden', !isExact);
+        document.getElementById('time_value_row').classList.toggle('hidden', isExact);
+    }
+    if (state.time_value !== undefined) {
+        document.getElementById('time_hours').value = state.time_value;
+    }
+    if (state.start_time) {
+        document.getElementById('start_time').value = state.start_time;
+    }
+    if (state.end_time) {
+        document.getElementById('end_time').value = state.end_time;
+    }
+    
+    // Режим анализа
+    if (state.analysis_mode) {
+        document.getElementById('analysis_mode_select').value = state.analysis_mode;
+        const isPolicy = state.analysis_mode === 'policyid';
+        document.getElementById('policyid_row').classList.toggle('hidden', !isPolicy);
+        document.getElementById('direction_row').classList.toggle('hidden', isPolicy);
+    }
+    if (state.direction) {
+        document.getElementById('direction_select').value = state.direction;
+    }
+    if (state.policyid !== undefined && state.policyid !== null) {
+        document.getElementById('policyid').value = state.policyid;
+    }
+    
+    // Формат
+    if (state.output_format) {
+        document.getElementById('output_format_select').value = state.output_format;
+    }
+    
+    // Smart Action
+    if (state.smart_action) {
+        document.getElementById('smart_action').value = state.smart_action;
+    }
+    
+    // Хосты
+    if (state.use_machines_file !== undefined) {
+        const machinesCheckbox = document.getElementById('use_machines_file');
+        machinesCheckbox.checked = state.use_machines_file;
+        const manual = document.getElementById('manual-targets');
+        if (state.use_machines_file) {
+            manual.style.display = 'none';
+            loadMachinesFile();
+        } else {
+            document.getElementById('targets-list').innerHTML = '';
+            manual.style.display = 'block';
+            // Восстанавливаем targets
+            if (state.targets && state.targets.length > 0) {
+                state.targets.forEach(t => addTargetRow(t.ip, t.mask || '/32'));
+            }
+        }
+    }
+    
+    // Исключить внутренние IP
+    if (state.exclude_internal !== undefined) {
+        document.getElementById('exclude_internal').checked = state.exclude_internal;
+    }
+    
+    // Порты
+    if (state.proto_enabled !== undefined) {
+        document.getElementById('proto_enabled').checked = state.proto_enabled;
+        document.getElementById('ports').disabled = !state.proto_enabled;
+    }
+    if (state.ports) {
+        document.getElementById('ports').value = state.ports;
+    }
+    
+    // Колонки
+    if (state.columns) {
+        const columnMap = {
+            connections: 'col_connections',
+            action: 'col_action',
+            policyid: 'col_policyid',
+            app: 'col_app',
+            srcintf: 'col_srcintf',
+            dstintf: 'col_dstintf',
+            policyname: 'col_policyname',
+            devname: 'col_devname',
+            smart_action: 'col_smart_action',
+        };
+        Object.entries(state.columns).forEach(([key, value]) => {
+            const checkboxId = columnMap[key];
+            if (checkboxId) {
+                document.getElementById(checkboxId).checked = value;
+            }
+        });
+    }
+    
+    // Визуальная обратная связь — подсветим строку на мгновение
+    const tbody = document.getElementById('main-history-tbody');
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach(row => {
+        if (row.getAttribute('data-state') === JSON.stringify(state)) {
+            row.style.background = 'rgba(59, 130, 246, 0.2)';
+            setTimeout(() => {
+                row.style.background = '';
+            }, 800);
+        }
+    });
+}
+
+// ---- Restore partial form state from CMD line (fallback for old history entries) ----
+function restoreFormStateFromCmd(cmd, timeRange, smartAction, hasPolicy, hasInbound, hasOutbound, direction, policyid) {
+    // Время — пытаемся извлечь из timeRange
+    if (timeRange) {
+        // Формат: "2026-04-09 09:58:13 → 2026-04-09 15:58:13"
+        const parts = timeRange.split('→').map(s => s.trim());
+        if (parts.length === 2) {
+            document.getElementById('time_mode_select').value = 'exact';
+            document.getElementById('exact_from').classList.remove('hidden');
+            document.getElementById('exact_to').classList.remove('hidden');
+            document.getElementById('time_value_row').classList.add('hidden');
+            // Преобразуем "2026-04-09 09:58:13" → "2026-04-09T09:58:13"
+            document.getElementById('start_time').value = parts[0].replace(' ', 'T');
+            document.getElementById('end_time').value = parts[1].replace(' ', 'T');
+        }
+    }
+    
+    // Режим и направление
+    if (hasPolicy && policyid) {
+        document.getElementById('analysis_mode_select').value = 'policyid';
+        document.getElementById('policyid_row').classList.remove('hidden');
+        document.getElementById('direction_row').classList.add('hidden');
+        document.getElementById('policyid').value = policyid;
+    } else if (direction) {
+        document.getElementById('analysis_mode_select').value = 'direction';
+        document.getElementById('policyid_row').classList.add('hidden');
+        document.getElementById('direction_row').classList.remove('hidden');
+        document.getElementById('direction_select').value = direction;
+    } else if (hasInbound && hasOutbound) {
+        document.getElementById('analysis_mode_select').value = 'direction';
+        document.getElementById('direction_select').value = 'all';
+    } else if (hasInbound) {
+        document.getElementById('analysis_mode_select').value = 'direction';
+        document.getElementById('direction_select').value = 'inbound';
+    } else if (hasOutbound) {
+        document.getElementById('analysis_mode_select').value = 'direction';
+        document.getElementById('direction_select').value = 'outbound';
+    }
+    
+    // Smart Action
+    if (smartAction) {
+        document.getElementById('smart_action').value = smartAction;
+    }
+    
+    // Парсим direction из CMD если есть
+    if (cmd && cmd.includes('direction=')) {
+        const dirMatch = cmd.match(/direction=(inbound|outbound|all)/);
+        if (dirMatch) {
+            document.getElementById('analysis_mode_select').value = 'direction';
+            document.getElementById('direction_select').value = dirMatch[1];
+        }
+    }
+    if (cmd && cmd.includes('policyid=')) {
+        const polMatch = cmd.match(/policyid=(\d+)/);
+        if (polMatch) {
+            document.getElementById('analysis_mode_select').value = 'policyid';
+            document.getElementById('policyid').value = polMatch[1];
+        }
+    }
 }
 
 // ---- Settings ----

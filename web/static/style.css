@@ -419,3 +419,15 @@ body {
     .analyze-layout { flex-direction: column; }
     .analyze-right { width: 100%; }
 }
+
+/* ---- CLICKABLE HISTORY ROWS ---- */
+.history-clickable-row {
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.history-clickable-row:hover {
+    background: rgba(59, 130, 246, 0.08);
+}
+.history-clickable-row:active {
+    background: rgba(59, 130, 246, 0.15);
+}

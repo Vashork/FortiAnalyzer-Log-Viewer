@@ -178,6 +178,7 @@ def parse_history() -> List[dict]:
             "exclude_used": False,
             "policyid": "",
             "summary_lines": [],
+            "state": None,  # Полное состояние запроса
         }
 
         for line in lines:
@@ -187,6 +188,13 @@ def parse_history() -> List[dict]:
                 entry["cmd"] = line[4:].strip()
             elif line.startswith("TIME:"):
                 entry["time_range"] = line[5:].strip()
+            elif line.startswith("STATE_JSON:"):
+                state_str = line[11:].strip()
+                if state_str:
+                    try:
+                        entry["state"] = json.loads(state_str)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse state JSON: {state_str}")
             elif line.startswith("SMART_ACTION="):
                 parts = line.split("|")
                 entry["smart_action"] = parts[0].split("=")[1].strip() if "=" in parts[0] else ""
@@ -298,7 +306,7 @@ def text_to_csv(text: str) -> str:
     return csv_output.getvalue()
 
 
-def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, filename: str):
+def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, filename: str, state_json: str = None):
     history_path = Path(RESULTS_DIR) / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -308,8 +316,13 @@ def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, f
         f"TIME: {start_time} в†’ {end_time}\n"
         f"SMART_ACTION={os.getenv("SMART_ACTION", "all")} | FILTER_MODE={os.getenv("FILTER_MODE", "faz")}\n"
         f"FILE: {filename}\n"
-        f"{'-' * 60}\n"
     )
+
+    # Добавляем JSON-состояние, если оно есть
+    if state_json:
+        header += f"STATE_JSON: {state_json}\n"
+
+    header += f"{'-' * 60}\n"
 
     with open(history_path, "a", encoding="utf-8") as f:
         f.write(header)
@@ -415,7 +428,23 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
                 _save_result(text, progress, results_dir, f"policy_{request.policyid}",
                                start_time, end_time, f"policyid={request.policyid}",
-                               request.output_format)
+                               request.output_format, state_json=json.dumps({
+                                   "time_mode": request.time_mode,
+                                   "time_value": request.time_value,
+                                   "start_time": request.start_time,
+                                   "end_time": request.end_time,
+                                   "analysis_mode": request.analysis_mode,
+                                   "direction": request.direction,
+                                   "policyid": request.policyid,
+                                   "output_format": request.output_format,
+                                   "smart_action": request.smart_action,
+                                   "use_machines_file": request.use_machines_file,
+                                   "targets": [t.model_dump() for t in request.targets],
+                                   "exclude_internal": request.exclude_internal,
+                                   "proto_enabled": request.proto_enabled,
+                                   "ports": request.ports,
+                                   "columns": request.columns,
+                               }, ensure_ascii=False))
                 done({"files": [{"name": f"policy_{request.policyid}.txt", "path": f"policy_{request.policyid}.txt"}],
                       "texts": {"txt": text}})
             else:
@@ -497,11 +526,31 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
                 all_files = []
                 all_texts = {}
+                
+                # Формируем JSON состояния один раз для всех направлений
+                state_json_str = json.dumps({
+                    "time_mode": request.time_mode,
+                    "time_value": request.time_value,
+                    "start_time": request.start_time,
+                    "end_time": request.end_time,
+                    "analysis_mode": request.analysis_mode,
+                    "direction": request.direction,
+                    "policyid": request.policyid,
+                    "output_format": request.output_format,
+                    "smart_action": request.smart_action,
+                    "use_machines_file": request.use_machines_file,
+                    "targets": [t.model_dump() for t in request.targets],
+                    "exclude_internal": request.exclude_internal,
+                    "proto_enabled": request.proto_enabled,
+                    "ports": request.ports,
+                    "columns": request.columns,
+                }, ensure_ascii=False)
+                
                 for direction in directions:
                     final_text = "\n\n".join(direction_text[direction]) if direction_text[direction] else "NO DATA\n"
                     files, texts = _save_result(final_text, progress, results_dir, direction,
                                    start_time, end_time, f"direction={direction}",
-                                   request.output_format)
+                                   request.output_format, state_json=state_json_str)
                     all_files.extend(files)
                     all_texts.update(texts)
                 # Only include per_ip if we actually have per-IP results (parallel mode)
@@ -520,7 +569,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
 
 def _save_result(text, progress, results_dir, name_prefix,
-                   start_time, end_time, cmd_label, output_format, ip=None):
+                   start_time, end_time, cmd_label, output_format, ip=None, state_json=None):
     """Сохраняет результат (txt + опционально csv), пишет историю, шлёт done."""
     from utils.output import save_results
 
@@ -529,7 +578,7 @@ def _save_result(text, progress, results_dir, name_prefix,
 
     txt_file = results_dir / f"{name_prefix}.txt"
     save_results(text, txt_file)
-    append_history_simple(text, start_time, end_time, cmd_label, txt_file.name)
+    append_history_simple(text, start_time, end_time, cmd_label, txt_file.name, state_json=state_json)
     files.append({"name": txt_file.name, "path": txt_file.name})
     result_data[f"{name_prefix}.txt"] = text
 
