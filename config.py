@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Корень проекта

@@ -4,8 +4,6 @@ from typing import Optional, List, Dict, Tuple
 import requests
 import urllib3
 
-from config import EMPTY_BATCH_LIMIT
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 

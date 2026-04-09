@@ -37,49 +37,6 @@ def parse_ip_range(spec: str) -> List[str]:
         return [spec]  # single IP
 
 
-def ip_in_cidr_or_range(ip_str: str, spec: str) -> bool:
-    """Проверяет, входит ли IP в CIDR или диапазон вида 'start-end'."""
-    ip = ipaddress.IPv4Address(ip_str)
-    spec = spec.strip()
-
-    if "/" in spec:
-        network = ipaddress.IPv4Network(spec, strict=False)
-        return ip in network
-    elif "-" in spec:
-        start_str, end_str = spec.split("-", 1)
-        start = ipaddress.IPv4Address(start_str.strip())
-        end = ipaddress.IPv4Address(end_str.strip())
-        return int(start) <= int(ip) <= int(end)
-    else:
-        return ip_str == spec
-
-
-# -----------------------------
-#  VLAN helpers
-# -----------------------------
-def normalize_vlan_key(s: str) -> str:
-    return s.strip().lower()
-
-
-def load_vlans(path: str) -> List[Tuple[str, str, str]]:
-    vlans: List[Tuple[str, str, str]] = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) >= 3:
-                    cidr_or_range = parts[0]
-                    vlan_id = parts[1]
-                    vlan_name = " ".join(parts[2:])
-                    vlans.append((cidr_or_range, vlan_id, vlan_name))
-    except FileNotFoundError:
-        pass
-    return vlans
-
-
 # -----------------------------
 #  Targets loader
 # -----------------------------

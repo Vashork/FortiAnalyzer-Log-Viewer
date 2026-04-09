@@ -1,4 +1,4 @@
-"""FastAPI web-сервер для falogviewerv2 (falv2)."""
+﻿"""FastAPI web-СЃРµСЂРІРµСЂ РґР»СЏ falogviewerv2 (falv2)."""
 
 import os
 import sys
@@ -19,24 +19,15 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Добавляем корень проекта в path
+# Р”РѕР±Р°РІР»СЏРµРј РєРѕСЂРµРЅСЊ РїСЂРѕРµРєС‚Р° РІ path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import (
-    PROJECT_ROOT as CFG_ROOT,
-    RESOURCES_DIR,
-    LOGS_DIR,
     MACHINES_FILE,
     INTERNAL_IPS_FILE,
     PORTS_FILE,
-    FORTIANALYZER_URL,
-    FORTIANALYZER_USERNAME,
-    FORTIANALYZER_PASSWORD,
-    BATCH_SIZE,
-    MAX_WORKERS,
-    SMART_ACTION,
-    FILTER_MODE,
+    LOGS_DIR,
     RESULTS_DIR,
     COLUMNS_CONFIG,
     get_dynamic_workers,
@@ -52,33 +43,33 @@ from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
 
 # ========================
-# Логирование веб-сервера
+# Р›РѕРіРёСЂРѕРІР°РЅРёРµ РІРµР±-СЃРµСЂРІРµСЂР°
 # ========================
 
 ensure_directories()
 
 log_file = Path(LOGS_DIR) / "web_server.log"
 
-# Форматтер для всех логов
+# Р¤РѕСЂРјР°С‚С‚РµСЂ РґР»СЏ РІСЃРµС… Р»РѕРіРѕРІ
 file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-# File handler — ВСЕ логи (наш код + uvicorn)
+# File handler вЂ” Р’РЎР• Р»РѕРіРё (РЅР°С€ РєРѕРґ + uvicorn)
 file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
 file_handler.setFormatter(file_formatter)
 file_handler.setLevel(logging.INFO)
 
-# Stream handler — только в консоль
+# Stream handler вЂ” С‚РѕР»СЊРєРѕ РІ РєРѕРЅСЃРѕР»СЊ
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(file_formatter)
 stream_handler.setLevel(logging.INFO)
 
-# Наш logger
+# РќР°С€ logger
 logger = logging.getLogger("falv2.web")
 logger.setLevel(logging.INFO)
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
 
-# Перехватываем uvicorn логи в файл
+# РџРµСЂРµС…РІР°С‚С‹РІР°РµРј uvicorn Р»РѕРіРё РІ С„Р°Р№Р»
 for uv_logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "uvicorn.asgi"):
     uv_logger = logging.getLogger(uv_logger_name)
     uv_logger.addHandler(file_handler)
@@ -86,7 +77,7 @@ for uv_logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "uvicorn.as
 
 
 # ========================
-# Pydantic модели
+# Pydantic РјРѕРґРµР»Рё
 # ========================
 
 class TargetHost(BaseModel):
@@ -128,7 +119,7 @@ class SettingsUpdate(BaseModel):
 
 
 # ========================
-# Хелперы
+# РҐРµР»РїРµСЂС‹
 # ========================
 
 def load_internal_ips() -> set:
@@ -204,7 +195,7 @@ def parse_history() -> List[dict]:
             elif line.startswith("FILE:"):
                 entry["file"] = line[5:].strip()
 
-        # Парсим направление и policyid из CMD
+        # РџР°СЂСЃРёРј РЅР°РїСЂР°РІР»РµРЅРёРµ Рё policyid РёР· CMD
         cmd = entry["cmd"]
         if "policyid=" in cmd:
             entry["has_policy"] = True
@@ -220,7 +211,7 @@ def parse_history() -> List[dict]:
         if "exclude" in cmd.lower() or "internal" in cmd.lower():
             entry["exclude_used"] = True
 
-        # Собираем итоговые строки
+        # РЎРѕР±РёСЂР°РµРј РёС‚РѕРіРѕРІС‹Рµ СЃС‚СЂРѕРєРё
         for line in lines:
             if line.startswith("Total "):
                 entry["summary_lines"].append(line.strip())
@@ -238,7 +229,7 @@ def parse_history() -> List[dict]:
 
 
 def update_env_file(updates: dict):
-    env_path = CFG_ROOT / ".env"
+    env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
         return
 
@@ -267,7 +258,7 @@ def update_env_file(updates: dict):
 
 
 def text_to_csv(text: str) -> str:
-    """Конвертирует текстовый отчёт в CSV."""
+    """РљРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ С‚РµРєСЃС‚РѕРІС‹Р№ РѕС‚С‡С‘С‚ РІ CSV."""
     if not text or text.strip() == "NO DATA":
         return "NO DATA"
 
@@ -277,14 +268,14 @@ def text_to_csv(text: str) -> str:
 
     header_written = False
     for line in lines:
-        # Пропускаем разделители и заголовки секций
+        # РџСЂРѕРїСѓСЃРєР°РµРј СЂР°Р·РґРµР»РёС‚РµР»Рё Рё Р·Р°РіРѕР»РѕРІРєРё СЃРµРєС†РёР№
         if line.startswith("=") or line.startswith("-") or not line.strip():
             continue
         if line.startswith("Total "):
             writer.writerow([line.strip()])
             continue
 
-        # Разделяем по двойным пробелам (как в отчёте)
+        # Р Р°Р·РґРµР»СЏРµРј РїРѕ РґРІРѕР№РЅС‹Рј РїСЂРѕР±РµР»Р°Рј (РєР°Рє РІ РѕС‚С‡С‘С‚Рµ)
         parts = [p.strip() for p in line.split("  ") if p.strip()]
         if not parts:
             continue
@@ -305,8 +296,8 @@ def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, f
     header = (
         f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n"
         f"CMD: {cmd}\n"
-        f"TIME: {start_time} → {end_time}\n"
-        f"SMART_ACTION={SMART_ACTION} | FILTER_MODE={FILTER_MODE}\n"
+        f"TIME: {start_time} в†’ {end_time}\n"
+        f"SMART_ACTION={os.getenv("SMART_ACTION", "all")} | FILTER_MODE={os.getenv("FILTER_MODE", "faz")}\n"
         f"FILE: {filename}\n"
         f"{'-' * 60}\n"
     )
@@ -317,7 +308,7 @@ def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, f
 
 
 # ========================
-# SSE прогресс
+# SSE РїСЂРѕРіСЂРµСЃСЃ
 # ========================
 
 _progress_queue = asyncio.Queue()
@@ -349,7 +340,7 @@ async def run_analysis_in_thread(request: AnalysisRequest):
                 start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
                 end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-            progress(f"Analyzing: {start_time} → {end_time}")
+            progress(f"Analyzing: {start_time} в†’ {end_time}")
 
             target_ips = []
             if request.use_machines_file:
@@ -444,7 +435,7 @@ async def run_analysis_in_thread(request: AnalysisRequest):
                             progress(f"[{ip}] Login failed")
                             return local_results
                         try:
-                            _patch_faz_for_sse_queue(client_ip, progress, ip)
+                            _patch_faz_for_sse(client_ip, progress, ip_label=ip)
                             report_dict = analyze_logs(
                                 client=client_ip, target_ips=[ip], direction=direction,
                                 start_time=start_time, end_time=end_time, exclude_ips=list(exclude_ips),
@@ -529,7 +520,10 @@ async def run_analysis_in_thread(request: AnalysisRequest):
     thread.start()
 
 
-def _patch_faz_for_sse(client: FortiAnalyzerClient, progress):
+def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):
+    """Патчим методы FAZ-клиента для SSE прогресса. ip_label - префикс для многопоточного режима."""
+    import time
+    prefix = f"[{ip_label}] " if ip_label else ""
     original_create = client.create_search_task
     original_wait = client.wait_for_task_completion
     original_fetch = client.fetch_logs
@@ -537,7 +531,7 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress):
     def patched_create(filter_str, start, end):
         result = original_create(filter_str, start, end)
         if result:
-            progress(f"Created search task: {result}")
+            progress(f"{prefix}Created search task: {result}")
         return result
 
     import time
@@ -558,10 +552,10 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress):
                 matched = raw.get("matched-logs", 0)
                 prog = raw.get("progress-percent", 0)
                 if prog != last_progress_val:
-                    progress(f"  Progress: {prog}%")
+                    progress(f"{prefix}Progress: {prog}%")
                     last_progress_val = prog
                 if status_code == 0 and prog == 100:
-                    progress(f"Task completed. Found {matched} logs")
+                    progress(f"{prefix}Task completed. Found {matched} logs")
                     return True, matched
                 if status_code in (0, 1):
                     time.sleep(5)
@@ -572,7 +566,7 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress):
         return False, 0
 
     def patched_fetch(task_id, total, batch=100):
-        progress(f"Fetching logs (matched={total}, batch={batch})...")
+        progress(f"{prefix}Fetching logs (matched={total}, batch={batch})...")
         all_logs = []
         offset = 0
         while offset < total:
@@ -591,86 +585,12 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress):
                 break
             all_logs.extend(data)
             offset += len(data)
-            progress(f"Fetched {len(all_logs)}/{total} logs")
+            progress(f"{prefix}Fetched {len(all_logs)}/{total} logs")
         return all_logs
 
     client.create_search_task = patched_create
     client.wait_for_task_completion = patched_wait
     client.fetch_logs = patched_fetch
-
-
-def _patch_faz_for_sse_queue(client: FortiAnalyzerClient, progress, ip_label):
-    import time
-    original_create = client.create_search_task
-    original_wait = client.wait_for_task_completion
-    original_fetch = client.fetch_logs
-
-    def patched_create(filter_str, start, end):
-        result = original_create(filter_str, start, end)
-        if result:
-            progress(f"[{ip_label}] Created search task: {result}")
-        return result
-
-    def patched_wait(task_id, max_wait=300):
-        start_ts = time.time()
-        last_progress_val = -1
-        while time.time() - start_ts < max_wait:
-            payload = {
-                "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
-                "session": client.session,
-            }
-            try:
-                result = client._post(payload)
-                raw = result.get("result", {})
-                status_code = raw.get("status", {}).get("code", -1)
-                matched = raw.get("matched-logs", 0)
-                prog = raw.get("progress-percent", 0)
-                if prog != last_progress_val:
-                    progress(f"[{ip_label}] Progress: {prog}%")
-                    last_progress_val = prog
-                if status_code == 0 and prog == 100:
-                    progress(f"[{ip_label}] Task done. Found {matched} logs")
-                    return True, matched
-                if status_code in (0, 1):
-                    time.sleep(5)
-                    continue
-                return False, 0
-            except Exception:
-                time.sleep(5)
-        return False, 0
-
-    def patched_fetch(task_id, total, batch=100):
-        progress(f"[{ip_label}] Fetching {total} logs...")
-        all_logs = []
-        offset = 0
-        while offset < total:
-            payload = {
-                "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                "params": [{"apiver": 3, "limit": batch, "offset": offset,
-                             "url": f"/logview/adom/root/logsearch/{task_id}"}],
-                "session": client.session,
-            }
-            try:
-                resp = client._post(payload)
-                data = resp.get("result", {}).get("data", [])
-            except Exception:
-                break
-            if not data:
-                break
-            all_logs.extend(data)
-            offset += len(data)
-            progress(f"[{ip_label}] Fetched {len(all_logs)}/{total}")
-        return all_logs
-
-    client.create_search_task = patched_create
-    client.wait_for_task_completion = patched_wait
-    client.fetch_logs = patched_fetch
-
-
-# ========================
-# FastAPI приложение
-# ========================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -773,7 +693,7 @@ async def download_result(file_path: str):
 
 @app.get("/api/resources/machines")
 async def get_machines():
-    """Загрузить IPs из machines.txt."""
+    """Р—Р°РіСЂСѓР·РёС‚СЊ IPs РёР· machines.txt."""
     machines_path = Path(MACHINES_FILE)
     if not machines_path.exists():
         return {"ips": []}
@@ -836,7 +756,7 @@ if __name__ == "__main__":
     import uvicorn
     import logging.config
 
-    # Конфигурация uvicorn logging — используем наш file_handler
+    # РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ uvicorn logging вЂ” РёСЃРїРѕР»СЊР·СѓРµРј РЅР°С€ file_handler
     logging_config = {
         "version": 1,
         "disable_existing_loggers": False,
@@ -869,4 +789,5 @@ if __name__ == "__main__":
     logging.config.dictConfig(logging_config)
 
     uvicorn.run(app, host="127.0.0.1", port=8500, log_config=None)
+
 
