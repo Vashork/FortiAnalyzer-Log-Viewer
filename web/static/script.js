@@ -1,6 +1,10 @@
 // ========================
-// falv2 — Client Script (v4)
+// falv2 — Client Script (v8)
 // ========================
+
+// ---- Глобальное состояние терминалов ----
+let _terminalPool = [];
+let _activeTerminals = {}; // "ip:direction" -> slot
 
 // ---- Sidebar nav ----
 document.querySelectorAll('.sidebar-link').forEach(link => {
@@ -82,21 +86,57 @@ async function runAnalysis() {
     document.getElementById('idle-panel').classList.add('hidden');
     document.getElementById('result-panel').classList.add('hidden');
     document.getElementById('progress-panel').classList.remove('hidden');
-    const plog = document.getElementById('progress-log');
-    plog.textContent = '';
 
+    // Очистка контейнера терминалов
+    const container = document.getElementById('worker-terminals');
+    container.innerHTML = '';
+    container.className = 'worker-terminals-grid';
+
+    // Собираем список IP для initial grid sizing
     const timeMode = document.getElementById('time_mode_select').value;
     const analysisMode = document.getElementById('analysis_mode_select').value;
-    const direction = document.getElementById('direction_select').value;
     const useMachines = document.getElementById('use_machines_file').checked;
+    const direction = document.getElementById('direction_select').value;
+    const workers = getWorkerCount();
 
-    const targets = [];
+    let targetIps = [];
     if (!useMachines) {
         document.querySelectorAll('.target-row').forEach(row => {
             const ip = row.querySelector('.target-ip').value.trim();
-            const mask = row.querySelector('.target-mask').value.trim();
-            if (ip) targets.push({ ip: ip, mask: mask });
+            if (ip) targetIps.push(ip);
         });
+    } else {
+        try {
+            const resp = await fetch('/api/resources/machines');
+            const data = await resp.json();
+            targetIps = data.ips || [];
+        } catch (e) {}
+        if (document.getElementById('exclude_internal').checked) {
+            try {
+                const intResp = await fetch('/api/resources/internal');
+                if (intResp.ok) {
+                    const intData = await intResp.json();
+                    const excludeSet = new Set(intData.ips || []);
+                    targetIps = targetIps.filter(ip => !excludeSet.has(ip));
+                }
+            } catch (e) {}
+        }
+    }
+
+    const directions = analysisMode === 'policyid' ? ['policy'] :
+                       direction === 'all' ? ['inbound', 'outbound'] : [direction];
+
+    // Определяем layout сетки: min(workers, total_tasks)
+    const totalTasks = analysisMode === 'policyid' ? 1 : (targetIps.length * directions.length);
+    const activeSlots = Math.min(workers, totalTasks);
+    setupTerminalGrid(container, activeSlots);
+
+    // Создаём пул терминалов (максимум workers штук)
+    _terminalPool = [];
+    _activeTerminals = {};
+
+    for (let i = 0; i < activeSlots; i++) {
+        _terminalPool.push({ el: null, ip: null, direction: null, terminal: null, free: true, status: null });
     }
 
     const payload = {
@@ -108,7 +148,7 @@ async function runAnalysis() {
         direction: direction,
         exclude_internal: document.getElementById('exclude_internal').checked,
         use_machines_file: useMachines,
-        targets: targets,
+        targets: useMachines ? [] : targetIps.map(ip => ({ ip: ip, mask: '/32' })),
         policyid: analysisMode === 'policyid' ? (+document.getElementById('policyid').value || null) : null,
         proto_enabled: document.getElementById('proto_enabled').checked,
         ports: document.getElementById('ports').value,
@@ -144,21 +184,185 @@ async function runAnalysis() {
             buf = lines.pop() || '';
             for (const line of lines) {
                 if (!line.startsWith('data: ')) continue;
-                try { handleEvent(JSON.parse(line.slice(6)), plog); } catch (e) {}
+                try { handleEvent(JSON.parse(line.slice(6))); } catch (e) { console.warn('SSE parse error', e); }
             }
         }
-    } catch (err) { plog.textContent += '\n❌ ' + err.message; }
+    } catch (err) {
+        Object.values(_activeTerminals).forEach(s => {
+            if (s.terminal) s.terminal.log.textContent += '\n❌ ' + err.message;
+        });
+        if (Object.keys(_activeTerminals).length === 0) {
+            container.innerHTML = '<div class="worker-terminal"><pre class="worker-terminal-log">❌ ' + escHtml(err.message) + '</pre></div>';
+        }
+    }
     finally {
         btn.disabled = false;
         loadMainHistory();
     }
 }
 
-function handleEvent(ev, plog) {
-    if (ev.type === 'progress') {
-        plog.textContent += ev.message + '\n';
-        plog.scrollTop = plog.scrollHeight;
+function getWorkerCount() {
+    return parseInt(document.getElementById('set_max_workers')?.value || '2', 10) || 2;
+}
+
+// ---- Глобальные функции управления терминалами ----
+function acquireTerminal(ip, direction) {
+    // 1) Ищем свободный слот
+    let slot = _terminalPool.find(s => s.free);
+    if (slot) {
+        return activateSlot(slot, ip, direction);
+    }
+
+    // 2) Ищем completed (worker_done) слот — переиспользуем самый старый
+    const completedSlot = _terminalPool.find(s => s.status === 'done');
+    if (completedSlot) {
+        // Удаляем старый терминал и создаём новый
+        releaseTerminal(completedSlot);
+        return activateSlot(completedSlot, ip, direction);
+    }
+
+    // 3) Все заняты и работают — берём первый (крайняя мера)
+    const anySlot = _terminalPool[0];
+    if (anySlot) {
+        releaseTerminal(anySlot);
+        return activateSlot(anySlot, ip, direction);
+    }
+
+    return null;
+}
+
+function activateSlot(slot, ip, direction) {
+    slot.free = false;
+    slot.ip = ip;
+    slot.direction = direction;
+    slot.status = 'running';
+    const key = ip + ':' + direction;
+    const term = createTerminal(document.getElementById('worker-terminals'), '🖥', `${ip} [${direction}]`);
+    slot.el = term.el;
+    slot.terminal = term;
+    _activeTerminals[key] = slot;
+    return slot;
+}
+
+function releaseTerminal(slot) {
+    if (slot && slot.el) {
+        slot.el.remove();
+        slot.el = null;
+        slot.terminal = null;
+    }
+    slot.free = true;
+    slot.ip = null;
+    slot.direction = null;
+    slot.status = null;
+    Object.keys(_activeTerminals).forEach(k => {
+        if (_activeTerminals[k] === slot) delete _activeTerminals[k];
+    });
+}
+
+function resetTerminals() {
+    _terminalPool.forEach(s => {
+        if (s.el) s.el.remove();
+        s.el = null;
+        s.terminal = null;
+        s.free = true;
+        s.ip = null;
+        s.direction = null;
+        s.status = null;
+    });
+    _activeTerminals = {};
+    document.getElementById('worker-terminals').innerHTML = '';
+}
+
+// ---- Создание терминала воркера ----
+function createTerminal(container, icon, label) {
+    const el = document.createElement('div');
+    el.className = 'worker-terminal';
+    el.innerHTML = '<div class="worker-terminal-header"><span class="status-dot"></span>' +
+        '<span class="terminal-label">' + icon + ' ' + escHtml(label) + '</span></div>' +
+        '<pre class="worker-terminal-log"></pre>';
+    container.appendChild(el);
+    return {
+        el: el,
+        log: el.querySelector('.worker-terminal-log'),
+        dot: el.querySelector('.status-dot'),
+        label: el.querySelector('.terminal-label'),
+        setStatus: function(status) {
+            this.dot.className = 'status-dot' + (status ? ' ' + status : '');
+        }
+    };
+}
+
+// ---- Динамическая сетка терминалов ----
+function setupTerminalGrid(container, workerCount) {
+    const availWidth = document.querySelector('.analyze-right').clientWidth - 36;
+    const availHeight = window.innerHeight - 220; // минус header + карточки
+
+    let cols, rows;
+    if (workerCount <= 1) {
+        cols = 1; rows = 1;
+    } else if (workerCount === 2) {
+        cols = 2; rows = 1;
+    } else if (workerCount <= 4) {
+        cols = 2; rows = 2;
+    } else if (workerCount <= 6) {
+        cols = 3; rows = 2;
+    } else {
+        cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(workerCount * (availWidth / (availHeight * 0.5))))));
+        rows = Math.ceil(workerCount / cols);
+    }
+
+    // Ограничиваем высоту чтобы терминалы не вылезали за экран
+    const termHeight = Math.max(100, Math.floor((availHeight - (rows - 1) * 10) / rows));
+
+    container.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    container.style.gridTemplateRows = `repeat(${rows}, minmax(${termHeight}px, 1fr))`;
+}
+
+// ---- Обработка SSE событий с маршрутизацией по IP ----
+function handleEvent(ev) {
+    if (ev.type === 'worker_start') {
+        const slot = acquireTerminal(ev.ip, ev.direction);
+        if (slot && slot.terminal) {
+            slot.terminal.setStatus('running');
+        }
+    } else if (ev.type === 'worker_done') {
+        const key = ev.ip + ':' + ev.direction;
+        const slot = _activeTerminals[key];
+        if (slot && slot.terminal) {
+            slot.status = 'done';
+            slot.terminal.setStatus('done');
+        }
+    } else if (ev.type === 'progress') {
+        const ip = ev.ip || null;
+        if (ip) {
+            const slot = Object.values(_activeTerminals).find(s => s.ip === ip);
+            if (slot && slot.terminal) {
+                slot.terminal.log.textContent += ev.message + '\n';
+                slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
+                slot.terminal.setStatus('running');
+            }
+        } else {
+            Object.values(_activeTerminals).forEach(s => {
+                if (s.terminal) {
+                    s.terminal.log.textContent += ev.message + '\n';
+                    s.terminal.log.scrollTop = s.terminal.log.scrollHeight;
+                }
+            });
+        }
+    } else if (ev.type === 'direction') {
+        const ip = ev.ip;
+        if (ip) {
+            const slot = Object.values(_activeTerminals).find(s => s.ip === ip);
+            if (slot && slot.terminal) {
+                slot.terminal.log.textContent += ev.message + '\n';
+                slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
+            }
+        }
     } else if (ev.type === 'done') {
+        Object.values(_activeTerminals).forEach(s => {
+            if (s.terminal) s.terminal.setStatus('done');
+        });
+
         document.getElementById('progress-panel').classList.add('hidden');
         document.getElementById('result-panel').classList.remove('hidden');
 
@@ -209,6 +413,16 @@ function handleEvent(ev, plog) {
 
         if (!perIp && dirKeys.length > 0) rc.textContent = texts[dirKeys[0]];
     } else if (ev.type === 'error') {
+        Object.values(_activeTerminals).forEach(s => {
+            if (s.terminal) {
+                s.terminal.log.textContent += '\n❌ ' + ev.message;
+                s.terminal.setStatus('error');
+            }
+        });
+        if (Object.keys(_activeTerminals).length === 0) {
+            const container = document.getElementById('worker-terminals');
+            container.innerHTML = '<div class="worker-terminal"><pre class="worker-terminal-log">❌ ' + escHtml(ev.message) + '</pre></div>';
+        }
         document.getElementById('progress-panel').classList.add('hidden');
         document.getElementById('result-panel').classList.remove('hidden');
         document.getElementById('result-content').textContent = ev.message;
@@ -225,6 +439,7 @@ function stopAnalysis() {
     document.getElementById('run-btn').disabled = false;
     document.getElementById('progress-panel').classList.add('hidden');
     document.getElementById('idle-panel').classList.remove('hidden');
+    resetTerminals();
 }
 
 document.getElementById('copy-btn').addEventListener('click', () => {
@@ -286,6 +501,7 @@ async function viewResult(p) {
         document.querySelector('[data-tab="analyze"]').click();
         document.getElementById('idle-panel').classList.add('hidden');
         document.getElementById('progress-panel').classList.add('hidden');
+        resetTerminals();
         document.getElementById('result-panel').classList.remove('hidden');
     } catch (err) { alert(err.message); }
 }

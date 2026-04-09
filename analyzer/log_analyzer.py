@@ -443,18 +443,19 @@ def analyze_logs(
         batch_size=100,
         ports=None,
         columns=None,
+        progress=None,
 ):
     filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
 
-    print(f"🔎 FILTER: {filter_str}")
-    print(f"🕒 TIME RANGE: {start_time} → {end_time}")
-    print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
+    if progress:
+        progress(f"📡 {direction}: {len(target_ips)} IPs, {start_time} → {end_time}")
 
     time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
     all_logs = []
 
     for seg_start, seg_end in time_ranges:
-        print(f"⏱ Segment: {seg_start} → {seg_end}")
+        if progress:
+            progress(f"⏱ {direction}: {seg_start} → {seg_end}")
 
         tid = client.create_search_task(filter_str, seg_start, seg_end)
         if not tid:
@@ -470,6 +471,12 @@ def analyze_logs(
         logs_segment = client.fetch_logs(tid, matched, batch_size)
         if logs_segment:
             all_logs.extend(logs_segment)
+
+    if progress:
+        if all_logs:
+            progress(f"✅ {direction}: {len(all_logs)} logs found")
+        else:
+            progress(f"⚠ {direction}: no logs in FAZ for this direction")
 
     if not all_logs:
         return {}

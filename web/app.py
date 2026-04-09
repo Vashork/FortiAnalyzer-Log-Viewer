@@ -329,14 +329,20 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     queue = asyncio.Queue()
     _progress_queues[request_id] = queue
 
-    def progress(msg: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "message": msg})
+    def progress(msg: str, ip: str = None):
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "message": msg, "ip": ip})
+
+    def worker_start(ip: str, direction: str):
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "worker_start", "ip": ip, "direction": direction})
+
+    def worker_done_event(ip: str, direction: str):
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "worker_done", "ip": ip, "direction": direction})
 
     def done(result: dict):
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
 
     def error(msg: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg})
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg, "ip": None})
 
     def run():
         try:
@@ -427,7 +433,8 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
 
                     def process_ip(ip, direction):
-                        progress(f"▶ Starting: {ip} [{direction}]")
+                        worker_start(ip, direction)
+                        progress(f"▶ Starting: {ip} [{direction}]", ip=ip)
                         report_dict = _faz_search_wrapper(
                             progress=progress,
                             faz_url=os.getenv("FORTIANALYZER_URL"),
@@ -448,7 +455,8 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                                         if ip not in per_ip_results:
                                             per_ip_results[ip] = {}
                                         per_ip_results[ip][dir_key] = txt
-                        progress(f"✓ Done: {ip} [{direction}]")
+                        progress(f"✓ Done: {ip} [{direction}]", ip=ip)
+                        worker_done_event(ip, direction)
                         return direction_text[dir_key] if direction else []
 
                     futures_map = {}
@@ -468,7 +476,8 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                     for direction in directions:
                         progress(f"▶ Direction: {direction}")
                         for ip in target_ips:
-                            progress(f"  ▶ Starting: {ip}")
+                            worker_start(ip, direction)
+                            progress(f"  ▶ Starting: {ip}", ip=ip)
                             report_dict = _faz_search_wrapper(
                                 progress=progress,
                                 faz_url=os.getenv("FORTIANALYZER_URL"),
@@ -483,7 +492,8 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                             for (_, dir_key), txt in (report_dict or {}).items():
                                 if txt.strip():
                                     direction_text[dir_key].append(txt)
-                            progress(f"  ✓ Done: {ip}")
+                            progress(f"  ✓ Done: {ip}", ip=ip)
+                            worker_done_event(ip, direction)
 
                 all_files = []
                 all_texts = {}
@@ -510,7 +520,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
 
 def _save_result(text, progress, results_dir, name_prefix,
-                   start_time, end_time, cmd_label, output_format):
+                   start_time, end_time, cmd_label, output_format, ip=None):
     """Сохраняет результат (txt + опционально csv), пишет историю, шлёт done."""
     from utils.output import save_results
 
@@ -521,15 +531,17 @@ def _save_result(text, progress, results_dir, name_prefix,
     save_results(text, txt_file)
     append_history_simple(text, start_time, end_time, cmd_label, txt_file.name)
     files.append({"name": txt_file.name, "path": txt_file.name})
-    result_data["txt"] = text
+    result_data[f"{name_prefix}.txt"] = text
 
     if output_format in ("csv", "both"):
         csv_text = text_to_csv(text)
         csv_file = results_dir / f"{name_prefix}.csv"
         csv_file.write_text(csv_text, encoding="utf-8")
         files.append({"name": csv_file.name, "path": csv_file.name})
-        result_data["csv"] = csv_text
+        result_data[f"{name_prefix}.csv"] = csv_text
 
+    if progress:
+        progress(f"💾 Saved: {name_prefix}.{output_format}", ip=ip)
     return files, result_data
 
 
@@ -568,9 +580,8 @@ def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
 
 
 def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):
-    """Патчим методы FAZ-клиента для SSE прогресса. ip_label - префикс для многопоточного режима."""
+    """Патчим методы FAZ-клиента для SSE прогресса. ip_label - IP воркера."""
     import time
-    prefix = f"[{ip_label}] " if ip_label else ""
     original_create = client.create_search_task
     original_wait = client.wait_for_task_completion
     original_fetch = client.fetch_logs
@@ -578,7 +589,7 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
     def patched_create(filter_str, start, end):
         result = original_create(filter_str, start, end)
         if result:
-            progress(f"{prefix}Created search task: {result}")
+            progress(f"Created search task: {result}", ip=ip_label)
         return result
 
     import time
@@ -590,7 +601,7 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
         poll_interval = 1  # опрашиваем каждую секунду для плавного SSE
 
         # Первое сообщение — сразу после создания таска
-        progress(f"{prefix}Waiting for FAZ to process search task...")
+        progress("Waiting for FAZ to process search task...", ip=ip_label)
 
         while time.time() - start_ts < max_wait:
             # Шлём "heartbeat" каждые poll_interval секунд даже если прогресс не изменился
@@ -613,27 +624,27 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
                 prog = raw.get("progress-percent", 0)
 
                 if prog != last_progress_val:
-                    progress(f"{prefix}Progress: {prog}%")
+                    progress(f"Progress: {prog}%", ip=ip_label)
                     last_progress_val = prog
                 else:
                     # heartbeat — показать, что мы всё ещё ждём
-                    progress(f"{prefix}Waiting... {prog}% | matched: {matched}")
+                    progress(f"Waiting... {prog}% | matched: {matched}", ip=ip_label)
 
                 if status_code == 0 and prog == 100:
-                    progress(f"{prefix}✅ Task completed. Found {matched} logs")
+                    progress(f"✅ Task completed. Found {matched} logs", ip=ip_label)
                     return True, matched
                 if status_code in (0, 1):
                     continue
-                progress(f"{prefix}⚠ Task failed with status code: {status_code}")
+                progress(f"⚠ Task failed with status code: {status_code}", ip=ip_label)
                 return False, 0
             except Exception as e:
-                progress(f"{prefix}⚠ Status check error, retrying: {e}")
+                progress(f"⚠ Status check error, retrying: {e}", ip=ip_label)
                 time.sleep(3)
-        progress(f"{prefix}⚠ Task did not complete within allowed time")
+        progress("⚠ Task did not complete within allowed time", ip=ip_label)
         return False, 0
 
     def patched_fetch(task_id, total, batch=100):
-        progress(f"{prefix}📥 Fetching logs (matched={total}, batch={batch})...")
+        progress(f"📥 Fetching logs (matched={total}, batch={batch})...", ip=ip_label)
         all_logs = []
         offset = 0
         while offset < total:
@@ -653,7 +664,7 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
             all_logs.extend(data)
             offset += len(data)
             pct = int(offset / total * 100) if total else 100
-            progress(f"{prefix}📥 Fetched {len(all_logs)}/{total} logs ({pct}%)")
+            progress(f"📥 Fetched {len(all_logs)}/{total} logs ({pct}%)", ip=ip_label)
         return all_logs
 
     client.create_search_task = patched_create
@@ -771,11 +782,20 @@ async def download_result(file_path: str):
 
 @app.get("/api/resources/machines")
 async def get_machines():
-    """Р—Р°РіСЂСѓР·РёС‚СЊ IPs РёР· machines.txt."""
+    """Загрузить IPs из machines.txt."""
     machines_path = Path(MACHINES_FILE)
     if not machines_path.exists():
         return {"ips": []}
     ips = load_machines(str(machines_path))
+    return {"ips": ips, "count": len(ips)}
+
+
+@app.get("/api/resources/internal")
+async def get_internal_ips():
+    """Загрузить IPs для исключения из internal_ips.txt."""
+    if not Path(INTERNAL_IPS_FILE).exists():
+        return {"ips": []}
+    ips = load_machines(str(INTERNAL_IPS_FILE))
     return {"ips": ips, "count": len(ips)}
 
 

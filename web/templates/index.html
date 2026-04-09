@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>falv2 — FortiAnalyzer Log Viewer</title>
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <link rel="stylesheet" href="/static/style.css?v=13">
 </head>
 <body>
 
@@ -27,6 +27,13 @@
         </div>
 
         <!-- 2-колоночный layout: параметры слева, вывод справа -->
+
+        <!-- Кнопки над обеими колонками -->
+        <div class="action-bar-top">
+            <button class="btn-primary" id="run-btn">▶ Запустить</button>
+            <button class="btn-secondary" id="stop-btn">⏹ Стоп</button>
+        </div>
+
         <div class="analyze-layout">
 
             <!-- ЛЕВАЯ: Форма -->
@@ -136,16 +143,11 @@
                 </div>
             </div>
 
-            <!-- ПРАВАЯ: Кнопки + Терминал + Результат -->
+            <!-- ПРАВАЯ: Терминал + Результат -->
             <div class="analyze-right">
-                <div class="action-bar-right">
-                    <button class="btn-primary" id="run-btn">▶ Запустить</button>
-                    <button class="btn-secondary" id="stop-btn">⏹ Стоп</button>
-                </div>
-
                 <div id="progress-panel" class="card hidden">
                     <div class="card-title">Прогресс</div>
-                    <div id="progress-log" class="progress-log"></div>
+                    <div id="worker-terminals" class="worker-terminals-grid"></div>
                 </div>
 
                 <div id="result-panel" class="card hidden">
@@ -226,6 +228,6 @@
 
 </main>
 
-<script src="/static/script.js?v=6"></script>
+<script src="/static/script.js?v=10"></script>
 </body>
 </html>
