@@ -103,7 +103,8 @@ async function runAnalysis() {
     if (!useMachines) {
         document.querySelectorAll('.target-row').forEach(row => {
             const ip = row.querySelector('.target-ip').value.trim();
-            if (ip) targetIps.push(ip);
+            const mask = row.querySelector('.target-mask').value.trim() || '/32';
+            if (ip) targetIps.push({ ip: ip, mask: mask });
         });
     } else {
         try {
@@ -148,7 +149,7 @@ async function runAnalysis() {
         direction: direction,
         exclude_internal: document.getElementById('exclude_internal').checked,
         use_machines_file: useMachines,
-        targets: useMachines ? [] : targetIps.map(ip => ({ ip: ip, mask: '/32' })),
+        targets: useMachines ? [] : targetIps,
         policyid: analysisMode === 'policyid' ? (+document.getElementById('policyid').value || null) : null,
         proto_enabled: document.getElementById('proto_enabled').checked,
         ports: document.getElementById('ports').value,
