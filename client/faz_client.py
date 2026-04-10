@@ -257,9 +257,7 @@ class FortiAnalyzerClient:
                         return all_logs
 
                     try:
-                        response = requests.post(self.url, json=payload, timeout=30, verify=False)
-                        response.raise_for_status()
-                        result = response.json()
+                        result = self._post(payload)
                         data = result.get("result", {}).get("data", [])
 
                     except Exception as e:

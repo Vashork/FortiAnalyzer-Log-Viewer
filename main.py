@@ -4,8 +4,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from dotenv import load_dotenv
-
 import os
 
 from config import (
@@ -16,8 +14,6 @@ from config import (
     validate_config,
     reload_env,
 )
-
-load_dotenv()
 
 from utils.network import load_machines, load_ports
 from client.faz_client import FortiAnalyzerClient
@@ -48,7 +44,7 @@ def _append_history(text: str, start_time: str, end_time: str, cmd: str, filenam
         f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n"
         f"CMD: {cmd}\n"
         f"TIME: {start_time} → {end_time}\n"
-        f"SMART_ACTION={os.getenv("SMART_ACTION", "all")} | FILTER_MODE={os.getenv("FILTER_MODE", "faz")}\n"
+        f"SMART_ACTION={os.getenv('SMART_ACTION', 'all')} | FILTER_MODE={os.getenv('FILTER_MODE', 'faz')}\n"
         f"FILE: {filename}\n"
         f"{'-'*60}\n"
     )
@@ -182,7 +178,11 @@ def main():
                 )
 
         for f in as_completed(futures):
-            reports = f.result() or {}
+            try:
+                reports = f.result() or {}
+            except Exception as e:
+                print(f"❌ Worker error: {e}", file=sys.stderr)
+                reports = {}
             for (_, direction), text in reports.items():
                 if text.strip():
                     direction_text[direction].append(text)

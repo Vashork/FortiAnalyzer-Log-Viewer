@@ -1,18 +1,20 @@
 # falv2 — FortiAnalyzer Log Viewer
 
-Web-интерфейс для анализа логов FortiAnalyzer через JSON-RPC API.
+Web-интерфейс и CLI для анализа логов FortiAnalyzer через JSON-RPC API.
 
 ## Возможности
 
 - **Direction Mode** — анализ трафика по направлению (Inbound / Outbound / Оба)
 - **PolicyID Mode** — анализ логов по конкретному policyid
+- **Time-Split Mode** — автоматическое дробление временного интервала на сегменты с параллельной обработкой воркерами
 - **Гибкий выбор целей** — файл `machines.txt` или ручной ввод IP/CIDR/подсетей
 - **Исключение внутренних IP** — фильтрация по `internal_ips.txt`
 - **Фильтрация по портам** — режим `--proto` с произвольным списком портов
 - **Smart Action** — фильтрация по действию (`all`, `deny`, `all-accept`)
 - **Настраиваемые колонки** — PolicyID, App, SrcIntf, DstIntf, Action и др.
 - **Форматы вывода** — TXT, CSV или оба
-- **Многопоточность** — параллельная обработка IP с настраиваемым числом воркеров
+- **Многопоточность** — параллельная обработка IP или временных сегментов
+- **Отмена задач** — поиск-задачи на FAZ корректно отменяются при остановке анализа
 - **История запросов** — полная детализация каждого запуска
 - **Логирование** — все события сервера в `logs/web_server.log`
 
@@ -27,7 +29,8 @@ falogviewerv2/
 │       ├── style.css
 │       └── script.js
 ├── analyzer/
-│   └── log_analyzer.py         # Агрегация и отчёты
+│   ├── log_analyzer.py         # Агрегация и отчёты, фильтрация логов
+│   └── time_range_analyzer.py  # Time-split режим: дробление времени, воркеры
 ├── client/
 │   └── faz_client.py           # JSON-RPC клиент FortiAnalyzer
 ├── utils/
@@ -75,7 +78,9 @@ python main.py --policyid 123 --start "2025-01-01 00:00:00" --end "2025-01-01 23
 | `FORTIANALYZER_USERNAME` | — | Логин |
 | `FORTIANALYZER_PASSWORD` | — | Пароль |
 | `BATCH_SIZE` | 100 | Размер батча при выгрузке логов |
+| `EMPTY_BATCH_LIMIT` | 3 | Лимит повторных попыток при пустом батче |
 | `MAX_WORKERS` | 1 | Число параллельных потоков |
+| `SESSION_SPLIT_MODE` | ip | `ip` (по IP) / `time` (по времени) |
 | `SMART_ACTION` | all | `all` / `deny` / `all-accept` |
 | `FILTER_MODE` | faz | `faz` (на стороне FAZ) / `local` (в Python) |
 | `MAX_TASK_HOURS` | 1 | Макс. длительность одного search-сегмента |
@@ -119,6 +124,7 @@ python main.py --policyid 123 --start "2025-01-01 00:00:00" --end "2025-01-01 23
 |---|---|---|
 | `/` | GET | Главная страница |
 | `/api/analyze/stream` | POST | SSE стрим анализа |
+| `/api/analyze/cancel/{request_id}` | POST | Отмена текущего анализа |
 | `/api/results` | GET | Список файлов результатов |
 | `/api/results/{path}` | GET | Содержимое файла |
 | `/api/results/download/{path}` | GET | Скачивание файла |
