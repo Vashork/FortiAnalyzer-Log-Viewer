@@ -431,3 +431,55 @@ body {
 .history-clickable-row:active {
     background: rgba(59, 130, 246, 0.15);
 }
+
+/* ---- FIX: Number input alignment ---- */
+input[type="number"].form-input {
+    text-align: left;
+}
+
+/* ---- FIX: Hide number spinner arrows (browser default) ---- */
+input[type="number"].form-input::-webkit-outer-spin-button,
+input[type="number"].form-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+input[type="number"].form-input {
+    -moz-appearance: textfield;
+}
+
+/* ---- FIX: Add host button theming ---- */
+.btn-add-host {
+    background: rgba(59, 130, 246, 0.08) !important;
+    border: 1px dashed var(--accent-blue) !important;
+    border-radius: var(--radius-sm) !important;
+    color: #6ea8fe !important;
+    font-size: 0.82rem;
+    cursor: pointer;
+    font-family: var(--font);
+    transition: all 0.15s;
+    padding: 5px 12px;
+}
+.btn-add-host:hover {
+    background: rgba(59, 130, 246, 0.15) !important;
+    color: var(--accent-blue) !important;
+}
+
+/* ---- FIX: Remove button theming ---- */
+.btn-remove {
+    background: transparent !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-muted) !important;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+.btn-remove:hover {
+    border-color: #ef4444 !important;
+    color: #ef4444 !important;
+}
