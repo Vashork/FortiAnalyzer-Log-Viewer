@@ -128,9 +128,8 @@ async function runAnalysis() {
     const directions = analysisMode === 'policyid' ? ['policy'] :
                        direction === 'all' ? ['inbound', 'outbound'] : [direction];
 
-    // Определяем layout сетки: min(workers, total_tasks)
-    const totalTasks = analysisMode === 'policyid' ? 1 : (targetIps.length * directions.length);
-    const activeSlots = Math.min(workers, totalTasks);
+    // Определяем layout сетки: слоты = воркеры (максимум 4)
+    const activeSlots = Math.min(workers, 4);
     setupTerminalGrid(container, activeSlots);
 
     // Создаём пул терминалов (максимум workers штук)
