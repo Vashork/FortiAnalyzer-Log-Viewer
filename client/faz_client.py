@@ -14,12 +14,13 @@ from config import EMPTY_BATCH_LIMIT
 class FortiAnalyzerClient:
     """Simple JSON-RPC client for FortiAnalyzer logsearch API."""
 
-    def __init__(self, url: str, username: str, password: str):
+    def __init__(self, url: str, username: str, password: str, cancel_check=None):
         self.url = url
         self.username = username
         self.password = password
         self.session: Optional[str] = None
         self._login_session_id = "1"
+        self.cancel_check = cancel_check  # callable() -> bool
 
     # ==========================
     #  Low-level wrapper
@@ -124,6 +125,11 @@ class FortiAnalyzerClient:
 
         try:
             while time.time() - start_ts < max_wait_seconds:
+                # Проверяем отмену
+                if self.cancel_check and self.cancel_check():
+                    print(f"  ⏹ Cancelled by user (wait_for_task_completion)")
+                    return False, 0
+
                 payload = {
                     "id": "123456789",
                     "jsonrpc": "2.0",
@@ -155,7 +161,11 @@ class FortiAnalyzerClient:
                         return True, matched_logs
 
                     if status_code in (0, 1):
-                        time.sleep(5)
+                        # Проверяем отмену во время ожидания
+                        for _ in range(10):  # разбиваем sleep(5) на 10 × 0.5s
+                            if self.cancel_check and self.cancel_check():
+                                return False, 0
+                            time.sleep(0.5)
                         continue
 
                     print(f"✗ Task failed with status code: {status_code}")
@@ -207,6 +217,11 @@ class FortiAnalyzerClient:
                 incomplete_retry = 0
 
                 while True:
+                    # Проверяем отмену перед каждым запросом
+                    if self.cancel_check and self.cancel_check():
+                        print(f"  ⏹ Cancelled by user (fetch_logs at offset {offset})")
+                        return all_logs
+
                     try:
                         response = requests.post(self.url, json=payload, timeout=30, verify=False)
                         response.raise_for_status()

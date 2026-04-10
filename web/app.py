@@ -34,6 +34,7 @@ from config import (
     get_dynamic_batch_size,
     get_dynamic_max_task_hours,
     get_dynamic_max_matched_logs,
+    get_dynamic_split_mode,
     reload_env,
     ensure_directories,
     validate_config,
@@ -41,6 +42,10 @@ from config import (
 from utils.network import load_machines, load_ports
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
+from analyzer.time_range_analyzer import (
+    analyze_logs_time_split,
+    analyze_policyid_logs_time_split,
+)
 
 # ========================
 # Р›РѕРіРёСЂРѕРІР°РЅРёРµ РІРµР±-СЃРµСЂРІРµСЂР°
@@ -114,6 +119,7 @@ class SettingsUpdate(BaseModel):
     max_task_hours: Optional[int] = None
     max_matched_logs: Optional[int] = None
     max_workers: Optional[int] = None
+    session_split_mode: Optional[str] = None  # "ip" или "time"
     columns: Optional[dict] = None
     output_format: Optional[str] = None
 
@@ -335,12 +341,14 @@ def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, f
 
 _analyze_semaphore = asyncio.Semaphore(2)
 _progress_queues: dict[str, asyncio.Queue] = {}
+_cancel_flags: dict[str, bool] = {}  # request_id -> True если отменено
 
 
 async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     loop = asyncio.get_event_loop()
     queue = asyncio.Queue()
     _progress_queues[request_id] = queue
+    _cancel_flags[request_id] = False  # флаг отмены
 
     def progress(msg: str, ip: str = None):
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "message": msg, "ip": ip})
@@ -352,12 +360,116 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "worker_done", "ip": ip, "direction": direction})
 
     def done(result: dict):
+        _cancel_flags.pop(request_id, None)  # cleanup
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
 
     def error(msg: str):
+        _cancel_flags.pop(request_id, None)  # cleanup
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg, "ip": None})
 
+    def is_cancelled() -> bool:
+        return _cancel_flags.get(request_id, False)
+
+    def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):
+        """Патчим методы FAZ-клиента для SSE прогресса И поддержки отмены."""
+        import time
+        original_create = client.create_search_task
+        original_wait = client.wait_for_task_completion
+        original_fetch = client.fetch_logs
+
+        def patched_create(filter_str, start, end):
+            if is_cancelled():
+                return None
+            result = original_create(filter_str, start, end)
+            if result:
+                progress(f"Created search task: {result}", ip=ip_label)
+            return result
+
+        def patched_wait(task_id, max_wait=300):
+            start_ts = time.time()
+            last_progress_val = -1
+            last_poll_ts = 0
+            poll_interval = 1
+
+            progress("Waiting for FAZ to process search task...", ip=ip_label)
+
+            while time.time() - start_ts < max_wait:
+                # Проверяем отмену каждые 2 секунды
+                if time.time() - last_poll_ts >= 2 and is_cancelled():
+                    progress("⏹ Cancelled by user", ip=ip_label)
+                    return False, 0
+
+                now = time.time()
+                if now - last_poll_ts < poll_interval:
+                    time.sleep(0.3)
+                    continue
+                last_poll_ts = now
+
+                payload = {
+                    "id": "123456789", "jsonrpc": "2.0", "method": "get",
+                    "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
+                    "session": client.session,
+                }
+                try:
+                    result = client._post(payload)
+                    raw = result.get("result", {})
+                    status_code = raw.get("status", {}).get("code", -1)
+                    matched = raw.get("matched-logs", 0)
+                    prog = raw.get("progress-percent", 0)
+
+                    if prog != last_progress_val:
+                        progress(f"Progress: {prog}%", ip=ip_label)
+                        last_progress_val = prog
+                    else:
+                        progress(f"Waiting... {prog}% | matched: {matched}", ip=ip_label)
+
+                    if status_code == 0 and prog == 100:
+                        progress(f"✅ Task completed. Found {matched} logs", ip=ip_label)
+                        return True, matched
+                    if status_code in (0, 1):
+                        continue
+                    progress(f"⚠ Task failed with status code: {status_code}", ip=ip_label)
+                    return False, 0
+                except Exception as e:
+                    progress(f"⚠ Status check error, retrying: {e}", ip=ip_label)
+                    time.sleep(3)
+            progress("⚠ Task did not complete within allowed time", ip=ip_label)
+            return False, 0
+
+        def patched_fetch(task_id, total, batch=100):
+            all_logs = []
+            offset = 0
+            while offset < total:
+                # Проверяем отмену перед каждым батчем
+                if is_cancelled():
+                    progress(f"  ⏹ Cancelled (fetched {len(all_logs)}/{total})", ip=ip_label)
+                    return all_logs
+
+                payload = {
+                    "id": "123456789", "jsonrpc": "2.0", "method": "get",
+                    "params": [{"apiver": 3, "limit": batch, "offset": offset,
+                                 "url": f"/logview/adom/root/logsearch/{task_id}"}],
+                    "session": client.session,
+                }
+                try:
+                    resp = client._post(payload)
+                    data = resp.get("result", {}).get("data", [])
+                except Exception:
+                    break
+                if not data:
+                    break
+                all_logs.extend(data)
+                offset += len(data)
+                pct = int(offset / total * 100) if total else 100
+                progress(f"📥 Fetched {len(all_logs)}/{total} logs ({pct}%)", ip=ip_label)
+            return all_logs
+
+        client.create_search_task = patched_create
+        client.wait_for_task_completion = patched_wait
+        client.fetch_logs = patched_fetch
+
     def run():
+        import threading
         try:
             reload_env()
 
@@ -392,6 +504,10 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                 error("No target IPs after expansion and exclusion")
                 return
 
+            if is_cancelled():
+                progress("⏹ Analysis cancelled by user")
+                return
+
             ports = [p.strip() for p in request.ports.split(",") if p.strip()] if request.proto_enabled else None
 
             if request.columns:
@@ -407,24 +523,72 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
             results_dir.mkdir(parents=True, exist_ok=True)
 
             if request.analysis_mode == "policyid" and request.policyid is not None:
-                progress(f"PolicyID mode: policyid={request.policyid}")
-                text = _faz_search_wrapper(
-                    progress=progress,
-                    faz_url=os.getenv("FORTIANALYZER_URL"),
-                    faz_user=os.getenv("FORTIANALYZER_USERNAME"),
-                    faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
-                    target_ips=target_ips,
-                    exclude_ips=list(exclude_ips),
-                    start_time=start_time, end_time=end_time,
-                    batch_size=get_dynamic_batch_size(), ports=ports,
-                    policyid=request.policyid, columns=request.columns,
-                )
-                if text is None:
-                    error("FAZ login failed")
+                split_mode = get_dynamic_split_mode()
+                workers = request.workers or get_dynamic_workers()
+
+                if is_cancelled():
+                    progress("⏹ Analysis cancelled by user")
                     return
-                if not str(text).strip():
-                    text = "NO DATA\n"
-                text = str(text)
+
+                if split_mode == "time" and workers > 1:
+                    # ===== TIME SPLIT MODE для PolicyID =====
+                    # ВНИМАНИЕ: не создаём главный клиент — воркеры создают свои сессии сами
+                    progress(f"PolicyID mode: policyid={request.policyid} (time-split, {workers} workers)")
+
+                    # Создаём терминалы для воркеров
+                    for w_id in range(workers):
+                        worker_start(f"W{w_id}", "policy")
+
+                    # Создаём "пустой" клиент только для передачи кредов (без логина)
+                    main_client = FortiAnalyzerClient(
+                        url=os.getenv("FORTIANALYZER_URL"),
+                        username=os.getenv("FORTIANALYZER_USERNAME"),
+                        password=os.getenv("FORTIANALYZER_PASSWORD"),
+                    )
+                    try:
+                        text = analyze_policyid_logs_time_split(
+                            main_client=main_client,
+                            target_ips=target_ips,
+                            policyid=request.policyid,
+                            start_time=start_time, end_time=end_time,
+                            exclude_ips=list(exclude_ips),
+                            batch_size=get_dynamic_batch_size(),
+                            ports=ports,
+                            columns=request.columns,
+                            num_workers=workers,
+                            progress=progress,
+                            cancel_check=is_cancelled,
+                        )
+                    finally:
+                        pass  # главный клиент не логинился, logout не нужен
+
+                    # Завершаем воркеры
+                    for w_id in range(workers):
+                        worker_done_event(f"W{w_id}", "policy")
+
+                    if not text:
+                        text = "NO DATA\n"
+                    text = str(text)
+                else:
+                    # ===== IP SPLIT MODE (старая логика) =====
+                    progress(f"PolicyID mode: policyid={request.policyid}")
+                    text = _faz_search_wrapper(
+                        progress=progress,
+                        faz_url=os.getenv("FORTIANALYZER_URL"),
+                        faz_user=os.getenv("FORTIANALYZER_USERNAME"),
+                        faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
+                        target_ips=target_ips,
+                        exclude_ips=list(exclude_ips),
+                        start_time=start_time, end_time=end_time,
+                        batch_size=get_dynamic_batch_size(), ports=ports,
+                        policyid=request.policyid, columns=request.columns,
+                    )
+                    if text is None:
+                        error("FAZ login failed")
+                        return
+                    if not str(text).strip():
+                        text = "NO DATA\n"
+                    text = str(text)
 
                 _save_result(text, progress, results_dir, f"policy_{request.policyid}",
                                start_time, end_time, f"policyid={request.policyid}",
@@ -454,7 +618,64 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                 direction_text = {d: [] for d in directions}
                 per_ip_results = {}
 
-                if workers > 1 and len(target_ips) > 1:
+                # Определяем режим дробления
+                split_mode = get_dynamic_split_mode()
+
+                if split_mode == "time" and workers > 1:
+                    # ===== TIME SPLIT MODE =====
+                    # Каждый воркер обрабатывает свои временные сегменты
+                    progress(f"⏱ Time-split mode: {workers} workers, {len(target_ips)} IPs")
+
+                    # Создаём терминалы для воркеров по времени
+                    for w_id in range(workers):
+                        worker_start(f"W{w_id}", "time-split")
+
+                    def process_direction_time_split(direction):
+                        """Обрабатывает одно направление через time splitting."""
+                        # Создаём "пустой" клиент только для передачи кредов (без логина)
+                        # Воркеры создадут свои сессии сами
+                        main_client = FortiAnalyzerClient(
+                            url=os.getenv("FORTIANALYZER_URL"),
+                            username=os.getenv("FORTIANALYZER_USERNAME"),
+                            password=os.getenv("FORTIANALYZER_PASSWORD"),
+                        )
+
+                        try:
+                            reports = analyze_logs_time_split(
+                                main_client=main_client,
+                                target_ips=target_ips,
+                                direction=direction,
+                                start_time=start_time, end_time=end_time,
+                                exclude_ips=list(exclude_ips),
+                                batch_size=get_dynamic_batch_size(),
+                                ports=ports,
+                                columns=request.columns,
+                                num_workers=workers,
+                                progress=progress,
+                                cancel_check=is_cancelled,
+                            )
+                            return direction, reports
+                        finally:
+                            pass  # главный клиент не логинился, logout не нужен
+
+                    for direction in directions:
+                        _, reports = process_direction_time_split(direction)
+                        if reports:
+                            _lock = threading.Lock()
+                            for (local_ip, dir_key), txt in reports.items():
+                                if txt.strip():
+                                    direction_text[dir_key].append(txt)
+                                    with _lock:
+                                        if local_ip not in per_ip_results:
+                                            per_ip_results[local_ip] = {}
+                                        per_ip_results[local_ip][dir_key] = txt
+
+                    # Завершаем воркеры
+                    for w_id in range(workers):
+                        worker_done_event(f"W{w_id}", "time-split")
+
+                elif workers > 1 and len(target_ips) > 1:
+                    # ===== IP SPLIT MODE (старая логика) =====
                     from concurrent.futures import ThreadPoolExecutor, as_completed
                     import threading
                     _ip_lock = threading.Lock()
@@ -768,6 +989,8 @@ async def analyze_stream(request: AnalysisRequest):
         queue = _progress_queues.get(request_id, asyncio.Queue())
 
     async def event_generator():
+        # Отправляем request_id первым сообщением
+        yield f"data: {json.dumps({'type': 'request_id', 'request_id': request_id}, ensure_ascii=False)}\n\n"
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=120)
@@ -781,6 +1004,15 @@ async def analyze_stream(request: AnalysisRequest):
                 break
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/analyze/cancel/{request_id}")
+async def cancel_analysis(request_id: str):
+    """Отменить текущий анализ."""
+    if request_id in _cancel_flags:
+        _cancel_flags[request_id] = True
+        return {"status": "cancelled", "request_id": request_id}
+    raise HTTPException(status_code=404, detail="Analysis not found")
 
 
 @app.get("/api/results")
@@ -866,6 +1098,7 @@ async def get_settings():
         "max_task_hours": get_dynamic_max_task_hours(),
         "max_matched_logs": get_dynamic_max_matched_logs(),
         "max_workers": get_dynamic_workers(),
+        "session_split_mode": get_dynamic_split_mode(),
         "columns": COLUMNS_CONFIG,
     }
 
@@ -891,6 +1124,10 @@ async def update_settings(data: SettingsUpdate):
         updates["MAX_MATCHED_LOGS_PER_TASK"] = str(data.max_matched_logs)
     if data.max_workers is not None:
         updates["MAX_WORKERS"] = str(data.max_workers)
+    if data.session_split_mode is not None:
+        val = data.session_split_mode.strip().lower()
+        if val in ("ip", "time"):
+            updates["SESSION_SPLIT_MODE"] = val
     if data.columns:
         for k, v in data.columns.items():
             updates[f"COLUMN_{k.upper()}"] = str(v).lower()

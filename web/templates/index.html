@@ -216,6 +216,13 @@
                 <div class="form-row"><label class="form-label">Max task hours</label><input type="number" id="set_max_task_hours" class="form-input"></div>
                 <div class="form-row"><label class="form-label">Max matched logs</label><input type="number" id="set_max_matched_logs" class="form-input"></div>
                 <div class="form-row"><label class="form-label">Max workers</label><input type="number" id="set_max_workers" class="form-input"></div>
+                <div class="form-row">
+                    <label class="form-label">Режим дробления</label>
+                    <select id="set_split_mode" class="form-select">
+                        <option value="ip">По IP (каждый воркер = один IP)</option>
+                        <option value="time">По времени (каждый воркер = свой период)</option>
+                    </select>
+                </div>
             </div>
         </div>
         <div class="card">
@@ -228,6 +235,6 @@
 
 </main>
 
-<script src="/static/script.js?v=12"></script>
+<script src="/static/script.js?v=14"></script>
 </body>
 </html>

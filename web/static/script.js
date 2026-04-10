@@ -5,6 +5,7 @@
 // ---- Глобальное состояние терминалов ----
 let _terminalPool = [];
 let _activeTerminals = {}; // "ip:direction" -> slot
+let _currentRequestId = null; // для отмены анализа
 
 // ---- Sidebar nav ----
 document.querySelectorAll('.sidebar-link').forEach(link => {
@@ -198,6 +199,7 @@ async function runAnalysis() {
     }
     finally {
         btn.disabled = false;
+        _currentRequestId = null;
         loadMainHistory();
     }
 }
@@ -321,6 +323,10 @@ function setupTerminalGrid(container, workerCount) {
 
 // ---- Обработка SSE событий с маршрутизацией по IP ----
 function handleEvent(ev) {
+    if (ev.type === 'request_id') {
+        _currentRequestId = ev.request_id;
+        return;
+    }
     if (ev.type === 'worker_start') {
         const slot = acquireTerminal(ev.ip, ev.direction);
         if (slot && slot.terminal) {
@@ -360,6 +366,7 @@ function handleEvent(ev) {
             }
         }
     } else if (ev.type === 'done') {
+        _currentRequestId = null;
         Object.values(_activeTerminals).forEach(s => {
             if (s.terminal) s.terminal.setStatus('done');
         });
@@ -420,6 +427,7 @@ function handleEvent(ev) {
 
         if (!perIp && dirKeys.length > 0) rc.textContent = texts[dirKeys[0]];
     } else if (ev.type === 'error') {
+        _currentRequestId = null;
         Object.values(_activeTerminals).forEach(s => {
             if (s.terminal) {
                 s.terminal.log.textContent += '\n❌ ' + ev.message;
@@ -443,6 +451,11 @@ function escHtml(s) {
 }
 
 function stopAnalysis() {
+    // Отправляем запрос на отмену
+    if (_currentRequestId) {
+        fetch('/api/analyze/cancel/' + _currentRequestId, { method: 'POST' }).catch(() => {});
+        _currentRequestId = null;
+    }
     document.getElementById('run-btn').disabled = false;
     document.getElementById('progress-panel').classList.add('hidden');
     document.getElementById('idle-panel').classList.remove('hidden');
@@ -746,6 +759,7 @@ async function loadSettings() {
         document.getElementById('set_max_task_hours').value = d.max_task_hours || 1;
         document.getElementById('set_max_matched_logs').value = d.max_matched_logs || 200000;
         document.getElementById('set_max_workers').value = d.max_workers || 1;
+        document.getElementById('set_split_mode').value = d.session_split_mode || 'ip';
     } catch (err) { console.error(err); }
 }
 
@@ -758,6 +772,7 @@ document.getElementById('save-settings-btn').addEventListener('click', async () 
         max_task_hours: +document.getElementById('set_max_task_hours').value,
         max_matched_logs: +document.getElementById('set_max_matched_logs').value,
         max_workers: +document.getElementById('set_max_workers').value,
+        session_split_mode: document.getElementById('set_split_mode').value,
     };
     const pwd = document.getElementById('set_faz_password').value;
     if (pwd) p.faz_password = pwd;

@@ -83,6 +83,11 @@ MAX_MATCHED_LOGS_PER_TASK = int(os.getenv("MAX_MATCHED_LOGS_PER_TASK", "200000")
 # Адаптивное ограничение воркеров
 ADAPTIVE_WORKER_THRESHOLD_HOURS = int(os.getenv("ADAPTIVE_WORKER_THRESHOLD_HOURS", "24"))
 
+# Режим дробления сессий: "ip" (по IP) или "time" (по времени)
+SESSION_SPLIT_MODE = os.getenv("SESSION_SPLIT_MODE", "ip").strip().lower()
+if SESSION_SPLIT_MODE not in ("ip", "time"):
+    SESSION_SPLIT_MODE = "ip"
+
 
 def get_dynamic_workers() -> int:
     """Динамическое чтение текущего значения MAX_WORKERS из .env."""
@@ -106,6 +111,13 @@ def get_dynamic_max_matched_logs() -> int:
     """Динамическое чтение MAX_MATCHED_LOGS_PER_TASK из .env."""
     reload_env()
     return int(os.getenv("MAX_MATCHED_LOGS_PER_TASK", 200000))
+
+
+def get_dynamic_split_mode() -> str:
+    """Динамическое чтение SESSION_SPLIT_MODE из .env."""
+    reload_env()
+    val = os.getenv("SESSION_SPLIT_MODE", "ip").strip().lower()
+    return val if val in ("ip", "time") else "ip"
 
 
 def ensure_directories():
