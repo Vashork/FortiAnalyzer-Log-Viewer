@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 import os
-from dotenv import load_dotenv
 
 from config import (
     RESULTS_DIR,
@@ -23,6 +22,17 @@ load_dotenv()
 from utils.network import load_machines, load_ports
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
+
+
+def _create_faz_client() -> FortiAnalyzerClient:
+    """Создать клиент FAZ из переменных окружения."""
+    return FortiAnalyzerClient(
+        url=os.getenv("FORTIANALYZER_URL"),
+        username=os.getenv("FORTIANALYZER_USERNAME"),
+        password=os.getenv("FORTIANALYZER_PASSWORD"),
+    )
+
+
 from utils.output import save_results
 
 
@@ -52,11 +62,7 @@ def _append_history(text: str, start_time: str, end_time: str, cmd: str, filenam
 # WORKER — ОДИН IP
 # ----------------------------------------------------
 def process_single_ip(ip, direction, start_time, end_time, exclude_ips, ports):
-    client = FortiAnalyzerClient(
-        url=os.getenv("FORTIANALYZER_URL"),
-        username=os.getenv("FORTIANALYZER_USERNAME"),
-        password=os.getenv("FORTIANALYZER_PASSWORD"),
-    )
+    client = _create_faz_client()
 
     if not client.login():
         raise RuntimeError("FAZ login failed")
@@ -121,11 +127,7 @@ def main():
 
     # ================= POLICY MODE =================
     if args.policyid is not None:
-        client = FortiAnalyzerClient(
-            url=os.getenv("FORTIANALYZER_URL"),
-            username=os.getenv("FORTIANALYZER_USERNAME"),
-            password=os.getenv("FORTIANALYZER_PASSWORD"),
-        )
+        client = _create_faz_client()
 
         if not client.login():
             print("❌ FAZ login failed", file=sys.stderr)

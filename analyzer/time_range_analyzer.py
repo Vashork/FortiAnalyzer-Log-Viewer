@@ -14,7 +14,6 @@ Time Range Analyzer — дробление сессий по времени.
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from client.faz_client import FortiAnalyzerClient
@@ -23,6 +22,7 @@ from analyzer.log_analyzer import (
     build_faz_filter,
     build_policy_faz_filter,
     _filter_logs_by_smart_action,
+    split_time_range_safe,
 )
 from config import (
     SMART_ACTION,
@@ -30,30 +30,6 @@ from config import (
     MAX_TASK_HOURS,
     MAX_MATCHED_LOGS_PER_TASK,
 )
-
-
-def split_time_range_safe(start_time: str, end_time: str, max_hours: int) -> List[Tuple[str, str]]:
-    """Режет временной интервал на сегменты по max_hours."""
-    if not max_hours or max_hours <= 0:
-        return [(start_time, end_time)]
-
-    if end_time.endswith(":99"):
-        end_time = end_time[:-2] + "59"
-
-    fmt = "%Y-%m-%d %H:%M:%S"
-    start_dt = datetime.strptime(start_time, fmt)
-    end_dt = datetime.strptime(end_time, fmt)
-
-    segments = []
-    delta = timedelta(hours=max_hours)
-    cur = start_dt
-
-    while cur < end_dt:
-        seg_end = min(cur + delta, end_dt)
-        segments.append((cur.strftime(fmt), seg_end.strftime(fmt)))
-        cur = seg_end
-
-    return segments
 
 
 def distribute_segments(segments: List[Tuple[str, str]], num_workers: int) -> List[List[Tuple[str, str]]]:
@@ -140,53 +116,28 @@ def fetch_logs_for_segments(
     return all_logs
 
 
-def analyze_logs_time_split(
+def _run_worker_segments(
     main_client: FortiAnalyzerClient,
+    filter_str: str,
+    workers_segments: List[List[Tuple[str, str]]],
     target_ips: List[str],
-    direction: str,
-    start_time: str,
-    end_time: str,
-    exclude_ips: List[str],
     batch_size: int,
-    ports: Optional[List[str]],
-    columns: dict,
     num_workers: int,
     progress=None,
-    cancel_check=None,  # callable() -> bool
-) -> Dict[Tuple[str, str], str]:
+    cancel_check=None,
+    worker_label_prefix: str = "W",
+) -> Dict[int, List[dict]]:
     """
-    Основной интерфейс для дробления по времени (direction mode).
-
-    Логика:
-    1. Режем время на сегменты
-    2. Распределяем по воркерам
-    3. Каждый воркер обрабатывает свои сегменты
-    4. Агрегируем результаты
+    Общий worker-паттерн: создаёт воркеры, каждый обрабатывает свои сегменты.
+    Возвращает dict {worker_id: logs}.
     """
-    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
-
-    if progress:
-        ips_str = ", ".join(target_ips[:5])
-        if len(target_ips) > 5:
-            ips_str += f" (+{len(target_ips) - 5} more)"
-        progress(f"📡 {direction}: {len(target_ips)} IPs, {start_time} → {end_time}")
-        progress(f"  🔍 IPs: {ips_str}")
-        progress(f"⏱ Time-split mode: {num_workers} workers")
-
-    # 1. Режем время
-    segments = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
-    if progress:
-        seg_display = " | ".join([f"{s[0].split(' ')[1]}→{s[1].split(' ')[1]}" for s in segments])
-        progress(f"  🕐 {len(segments)} segments: {seg_display}")
-
-    # 2. Распределяем по воркерам
-    workers_segments = distribute_segments(segments, num_workers)
-
-    # 3. Каждый воркер обрабатывает свои сегменты
     all_logs_by_worker: Dict[int, List[dict]] = {}
+    ips_str = ", ".join(target_ips[:5])
+    if len(target_ips) > 5:
+        ips_str += f" (+{len(target_ips) - 5} more)"
 
     def worker_task(worker_id: int, segs: List[Tuple[str, str]]) -> Tuple[int, List[dict]]:
-        label = f"W{worker_id}"
+        label = f"{worker_label_prefix}{worker_id}"
         total_time_ranges = " + ".join([f"{s[0].split(' ')[1]}→{s[1].split(' ')[1]}" for s in segs])
         if progress:
             progress(f"▶ {label}: {len(segs)} segments [{total_time_ranges}]", ip=label)
@@ -218,7 +169,7 @@ def analyze_logs_time_split(
     futures_map = {}
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         for i, segs in enumerate(workers_segments):
-            if segs:  # только если есть сегменты для этого воркера
+            if segs:
                 future = ex.submit(worker_task, i, segs)
                 futures_map[future] = i
 
@@ -231,19 +182,64 @@ def analyze_logs_time_split(
             if progress:
                 progress(f"❌ Worker {worker_id} error: {e}")
 
-    # 4. Агрегируем все логи
-    all_logs = []
-    for wid in sorted(all_logs_by_worker.keys()):
-        all_logs.extend(all_logs_by_worker[wid])
+    return all_logs_by_worker
+
+
+def analyze_logs_time_split(
+    main_client: FortiAnalyzerClient,
+    target_ips: List[str],
+    direction: str,
+    start_time: str,
+    end_time: str,
+    exclude_ips: List[str],
+    batch_size: int,
+    ports: Optional[List[str]],
+    columns: dict,
+    num_workers: int,
+    progress=None,
+    cancel_check=None,  # callable() -> bool
+) -> Dict[Tuple[str, str], str]:
+    """
+    Основной интерфейс для дробления по времени (direction mode).
+    """
+    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
 
     if progress:
-        if all_logs:
-            progress(f"✅ {direction}: {len(all_logs)} total logs from {len(all_logs_by_worker)} workers")
+        ips_str = ", ".join(target_ips[:5])
+        if len(target_ips) > 5:
+            ips_str += f" (+{len(target_ips) - 5} more)"
+        progress(f"📡 {direction}: {len(target_ips)} IPs, {start_time} → {end_time}")
+        progress(f"  🔍 IPs: {ips_str}")
+        progress(f"⏱ Time-split mode: {num_workers} workers")
+
+    segments = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
+    if progress:
+        seg_display = " | ".join([f"{s[0].split(' ')[1]}→{s[1].split(' ')[1]}" for s in segments])
+        progress(f"  🕐 {len(segments)} segments: {seg_display}")
+
+    workers_segments = distribute_segments(segments, num_workers)
+
+    all_logs_by_worker = _run_worker_segments(
+        main_client=main_client, filter_str=filter_str,
+        workers_segments=workers_segments, target_ips=target_ips,
+        batch_size=batch_size, num_workers=num_workers,
+        progress=progress, cancel_check=cancel_check,
+        worker_label_prefix="W",
+    )
+
+    if progress:
+        total = sum(len(v) for v in all_logs_by_worker.values())
+        if total:
+            progress(f"✅ {direction}: {total} total logs from {len(all_logs_by_worker)} workers")
         else:
             progress(f"⚠ {direction}: no logs found")
 
-    if not all_logs:
+    if not all_logs_by_worker:
         return {}
+
+    all_logs = []
+    for wid in sorted(all_logs_by_worker.keys()):
+        all_logs.extend(all_logs_by_worker[wid])
 
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
@@ -281,8 +277,6 @@ def analyze_policyid_logs_time_split(
 
     workers_segments = distribute_segments(segments, num_workers)
 
-    all_logs_by_worker: Dict[int, List[dict]] = {}
-
     def worker_task(worker_id: int, segs: List[Tuple[str, str]]) -> Tuple[int, List[dict]]:
         label = f"W{worker_id}[policy]"
         total_time_ranges = " | ".join([f"{s[0]} → {s[1]}" for s in segs])
@@ -312,6 +306,7 @@ def analyze_policyid_logs_time_split(
         finally:
             w_client.logout()
 
+    all_logs_by_worker: Dict[int, List[dict]] = {}
     futures_map = {}
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         for i, segs in enumerate(workers_segments):

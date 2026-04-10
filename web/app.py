@@ -370,104 +370,6 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     def is_cancelled() -> bool:
         return _cancel_flags.get(request_id, False)
 
-    def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):
-        """Патчим методы FAZ-клиента для SSE прогресса И поддержки отмены."""
-        import time
-        original_create = client.create_search_task
-        original_wait = client.wait_for_task_completion
-        original_fetch = client.fetch_logs
-
-        def patched_create(filter_str, start, end):
-            if is_cancelled():
-                return None
-            result = original_create(filter_str, start, end)
-            if result:
-                progress(f"Created search task: {result}", ip=ip_label)
-            return result
-
-        def patched_wait(task_id, max_wait=300):
-            start_ts = time.time()
-            last_progress_val = -1
-            last_poll_ts = 0
-            poll_interval = 1
-
-            progress("Waiting for FAZ to process search task...", ip=ip_label)
-
-            while time.time() - start_ts < max_wait:
-                # Проверяем отмену каждые 2 секунды
-                if time.time() - last_poll_ts >= 2 and is_cancelled():
-                    progress("⏹ Cancelled by user", ip=ip_label)
-                    return False, 0
-
-                now = time.time()
-                if now - last_poll_ts < poll_interval:
-                    time.sleep(0.3)
-                    continue
-                last_poll_ts = now
-
-                payload = {
-                    "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                    "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
-                    "session": client.session,
-                }
-                try:
-                    result = client._post(payload)
-                    raw = result.get("result", {})
-                    status_code = raw.get("status", {}).get("code", -1)
-                    matched = raw.get("matched-logs", 0)
-                    prog = raw.get("progress-percent", 0)
-
-                    if prog != last_progress_val:
-                        progress(f"Progress: {prog}%", ip=ip_label)
-                        last_progress_val = prog
-                    else:
-                        progress(f"Waiting... {prog}% | matched: {matched}", ip=ip_label)
-
-                    if status_code == 0 and prog == 100:
-                        progress(f"✅ Task completed. Found {matched} logs", ip=ip_label)
-                        return True, matched
-                    if status_code in (0, 1):
-                        continue
-                    progress(f"⚠ Task failed with status code: {status_code}", ip=ip_label)
-                    return False, 0
-                except Exception as e:
-                    progress(f"⚠ Status check error, retrying: {e}", ip=ip_label)
-                    time.sleep(3)
-            progress("⚠ Task did not complete within allowed time", ip=ip_label)
-            return False, 0
-
-        def patched_fetch(task_id, total, batch=100):
-            all_logs = []
-            offset = 0
-            while offset < total:
-                # Проверяем отмену перед каждым батчем
-                if is_cancelled():
-                    progress(f"  ⏹ Cancelled (fetched {len(all_logs)}/{total})", ip=ip_label)
-                    return all_logs
-
-                payload = {
-                    "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                    "params": [{"apiver": 3, "limit": batch, "offset": offset,
-                                 "url": f"/logview/adom/root/logsearch/{task_id}"}],
-                    "session": client.session,
-                }
-                try:
-                    resp = client._post(payload)
-                    data = resp.get("result", {}).get("data", [])
-                except Exception:
-                    break
-                if not data:
-                    break
-                all_logs.extend(data)
-                offset += len(data)
-                pct = int(offset / total * 100) if total else 100
-                progress(f"📥 Fetched {len(all_logs)}/{total} logs ({pct}%)", ip=ip_label)
-            return all_logs
-
-        client.create_search_task = patched_create
-        client.wait_for_task_completion = patched_wait
-        client.fetch_logs = patched_fetch
-
     def run():
         import threading
         try:
@@ -582,6 +484,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                         start_time=start_time, end_time=end_time,
                         batch_size=get_dynamic_batch_size(), ports=ports,
                         policyid=request.policyid, columns=request.columns,
+                        cancel_check=is_cancelled,
                     )
                     if text is None:
                         error("FAZ login failed")
@@ -695,6 +598,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                             start_time=start_time, end_time=end_time,
                             batch_size=get_dynamic_batch_size(), ports=ports,
                             direction=direction, columns=request.columns,
+                            cancel_check=is_cancelled,
                         )
                         if report_dict:
                             for (_, dir_key), txt in (report_dict or {}).items():
@@ -738,6 +642,7 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
                                 start_time=start_time, end_time=end_time,
                                 batch_size=get_dynamic_batch_size(), ports=ports,
                                 direction=direction,
+                                cancel_check=is_cancelled,
                             )
                             for (_, dir_key), txt in (report_dict or {}).items():
                                 if txt.strip():
@@ -817,7 +722,8 @@ def _save_result(text, progress, results_dir, name_prefix,
 
 def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
                         target_ips, exclude_ips, start_time, end_time,
-                        batch_size, ports, direction=None, policyid=None, columns=None):
+                        batch_size, ports, direction=None, policyid=None, columns=None,
+                        cancel_check=None):
     """
     Общий паттерн FAZ search: login → patch → analyze → logout.
     direction — для direction mode, policyid — для policyid mode.
@@ -825,12 +731,13 @@ def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
     """
     client = FortiAnalyzerClient(
         url=faz_url, username=faz_user, password=faz_pass,
+        cancel_check=cancel_check,
     )
     if not client.login():
         return None
     try:
         ip_label = target_ips[0] if target_ips and direction else ""
-        _patch_faz_for_sse(client, progress, ip_label=ip_label)
+        _patch_faz_for_sse(client, progress, ip_label=ip_label, cancel_check=cancel_check)
 
         if policyid is not None:
             return analyze_policyid_logs(
@@ -849,32 +756,35 @@ def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
 
 
 
-def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""):
-    """Патчим методы FAZ-клиента для SSE прогресса. ip_label - IP воркера."""
+def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = "", cancel_check=None):
+    """Патчим методы FAZ-клиента для SSE прогресса и поддержки отмены."""
     import time
     original_create = client.create_search_task
     original_wait = client.wait_for_task_completion
     original_fetch = client.fetch_logs
 
     def patched_create(filter_str, start, end):
+        if cancel_check and cancel_check():
+            return None
         result = original_create(filter_str, start, end)
         if result:
             progress(f"Created search task: {result}", ip=ip_label)
         return result
 
-    import time
-
     def patched_wait(task_id, max_wait=300):
         start_ts = time.time()
         last_progress_val = -1
         last_poll_ts = 0
-        poll_interval = 1  # опрашиваем каждую секунду для плавного SSE
+        poll_interval = 1
 
-        # Первое сообщение — сразу после создания таска
         progress("Waiting for FAZ to process search task...", ip=ip_label)
 
         while time.time() - start_ts < max_wait:
-            # Шлём "heartbeat" каждые poll_interval секунд даже если прогресс не изменился
+            if cancel_check and cancel_check():
+                progress("⏹ Cancelled by user", ip=ip_label)
+                client.cancel_search_task(task_id)
+                return False, 0
+
             now = time.time()
             if now - last_poll_ts < poll_interval:
                 time.sleep(0.3)
@@ -897,7 +807,6 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
                     progress(f"Progress: {prog}%", ip=ip_label)
                     last_progress_val = prog
                 else:
-                    # heartbeat — показать, что мы всё ещё ждём
                     progress(f"Waiting... {prog}% | matched: {matched}", ip=ip_label)
 
                 if status_code == 0 and prog == 100:
@@ -914,10 +823,14 @@ def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = ""
         return False, 0
 
     def patched_fetch(task_id, total, batch=100):
-        progress(f"📥 Fetching logs (matched={total}, batch={batch})...", ip=ip_label)
         all_logs = []
         offset = 0
         while offset < total:
+            if cancel_check and cancel_check():
+                progress(f"  ⏹ Cancelled (fetched {len(all_logs)}/{total})", ip=ip_label)
+                client.cancel_search_task(task_id)
+                return all_logs
+
             payload = {
                 "id": "123456789", "jsonrpc": "2.0", "method": "get",
                 "params": [{"apiver": 3, "limit": batch, "offset": offset,

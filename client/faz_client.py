@@ -1,5 +1,3 @@
-import os
-
 import time
 from typing import Optional, List, Dict, Tuple
 
@@ -21,6 +19,7 @@ class FortiAnalyzerClient:
         self.session: Optional[str] = None
         self._login_session_id = "1"
         self.cancel_check = cancel_check  # callable() -> bool
+        self._active_tasks: List[int] = []  # отслеживаем созданные search tasks
 
     # ==========================
     #  Low-level wrapper
@@ -59,6 +58,10 @@ class FortiAnalyzerClient:
             return False
 
     def logout(self) -> bool:
+        # Перед logout отменяем все активные search tasks
+        if self._active_tasks:
+            self.cancel_all_tasks()
+
         if not self.session:
             return True
 
@@ -105,12 +108,10 @@ class FortiAnalyzerClient:
             raw = result.get("result")
 
             if isinstance(raw, dict) and "tid" in raw:
-                print(f"✓ Created search task with ID: {raw['tid']}")
-                return raw["tid"]
-
-            if isinstance(raw, list) and raw and "tid" in raw[0]:
-                print(f"✓ Created search task with ID: {raw[0]['tid']}")
-                return raw[0]["tid"]
+                tid = raw["tid"]
+                self._active_tasks.append(tid)  # трекаем созданный task
+                print(f"✓ Created search task with ID: {tid}")
+                return tid
 
             print(f"✗ Failed to create search task: {result}")
             return None
@@ -118,6 +119,33 @@ class FortiAnalyzerClient:
         except Exception as e:
             print(f"✗ Search task creation error: {e}")
             return None
+
+    def cancel_search_task(self, task_id: int) -> bool:
+        """Отменяет search task на сервере FAZ."""
+        if not self.session:
+            return False
+        payload = {
+            "id": "123456789",
+            "jsonrpc": "2.0",
+            "method": "delete",
+            "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/{task_id}"}],
+            "session": self.session,
+        }
+        try:
+            self._post(payload)
+            print(f"  ⏹ Cancelled search task {task_id} on FAZ")
+            return True
+        except Exception as e:
+            print(f"  ⚠ Failed to cancel task {task_id}: {e}")
+            return False
+
+    def cancel_all_tasks(self) -> None:
+        """Отменяет все активные search tasks."""
+        for task_id in list(self._active_tasks):
+            if self.cancel_check and self.cancel_check():
+                break
+            self.cancel_search_task(task_id)
+        self._active_tasks.clear()
 
     def wait_for_task_completion(self, task_id: int, max_wait_seconds: int = 300) -> Tuple[bool, int]:
         start_ts = time.time()
@@ -128,6 +156,9 @@ class FortiAnalyzerClient:
                 # Проверяем отмену
                 if self.cancel_check and self.cancel_check():
                     print(f"  ⏹ Cancelled by user (wait_for_task_completion)")
+                    self.cancel_search_task(task_id)  # отменяем task на сервере
+                    if task_id in self._active_tasks:
+                        self._active_tasks.remove(task_id)
                     return False, 0
 
                 payload = {
@@ -220,6 +251,9 @@ class FortiAnalyzerClient:
                     # Проверяем отмену перед каждым запросом
                     if self.cancel_check and self.cancel_check():
                         print(f"  ⏹ Cancelled by user (fetch_logs at offset {offset})")
+                        self.cancel_search_task(task_id)  # отменяем task на сервере
+                        if task_id in self._active_tasks:
+                            self._active_tasks.remove(task_id)
                         return all_logs
 
                     try:

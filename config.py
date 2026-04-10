@@ -24,11 +24,6 @@ def reload_env():
         load_dotenv(env_path, override=True)
 
 
-# FortiAnalyzer credentials
-FORTIANALYZER_URL = os.getenv("FORTIANALYZER_URL")
-FORTIANALYZER_USERNAME = os.getenv("FORTIANALYZER_USERNAME")
-FORTIANALYZER_PASSWORD = os.getenv("FORTIANALYZER_PASSWORD")
-
 # Default search intervals
 DEFAULT_TIME_RANGE_HOURS = int(os.getenv("DEFAULT_TIME_RANGE_HOURS", 24))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 100))
@@ -79,9 +74,6 @@ MAX_TASK_HOURS = int(os.getenv("MAX_TASK_HOURS", "4"))
 
 # Максимальное количество логов, которые мы готовы вытянуть для одного task.
 MAX_MATCHED_LOGS_PER_TASK = int(os.getenv("MAX_MATCHED_LOGS_PER_TASK", "200000"))
-
-# Адаптивное ограничение воркеров
-ADAPTIVE_WORKER_THRESHOLD_HOURS = int(os.getenv("ADAPTIVE_WORKER_THRESHOLD_HOURS", "24"))
 
 # Режим дробления сессий: "ip" (по IP) или "time" (по времени)
 SESSION_SPLIT_MODE = os.getenv("SESSION_SPLIT_MODE", "ip").strip().lower()
