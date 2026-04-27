@@ -112,6 +112,12 @@ def get_dynamic_split_mode() -> str:
     return val if val in ("ip", "time") else "ip"
 
 
+def get_dynamic_reverse_dns_enabled() -> bool:
+    """Динамически проверяет, включён ли reverse DNS resolve."""
+    reload_env()
+    return not _get_bool("DISABLE_REVERSE_DNS", "false")
+
+
 def ensure_directories():
     """Создать необходимые директории если их нет."""
     Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)

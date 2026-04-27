@@ -6,6 +6,64 @@
 let _terminalPool = [];
 let _activeTerminals = {}; // "ip:direction" -> slot
 let _currentRequestId = null; // для отмены анализа
+let _pendingBroadcastMessages = [];
+let _savedUseMachinesFile = true;
+let _wasPolicyMode = false;
+
+function normalizeDateTimeLocal(value) {
+    if (!value) return null;
+    const normalized = value.trim().replace('T', ' ');
+    return normalized.length === 16 ? normalized + ':00' : normalized;
+}
+
+function parsePolicyIds(value) {
+    return (value || '')
+        .split(',')
+        .map(v => v.trim())
+        .filter(Boolean)
+        .map(v => parseInt(v, 10))
+        .filter(v => Number.isInteger(v) && v > 0);
+}
+
+function toDateTimeLocalValue(value) {
+    if (!value) return '';
+    return value.replace(' ', 'T').slice(0, 19);
+}
+
+function syncTargetVisibility() {
+    const isPolicy = document.getElementById('analysis_mode_select').value === 'policyid';
+    const useMachinesCheckbox = document.getElementById('use_machines_file');
+    const manual = document.getElementById('manual-targets');
+    const addBtn = document.getElementById('add-target-btn');
+    const targetsList = document.getElementById('targets-list');
+    const toggleRow = useMachinesCheckbox.closest('.form-row');
+    const toggleLabel = toggleRow ? toggleRow.querySelector('.toggle-switch') : null;
+
+    if (isPolicy) {
+        if (!_wasPolicyMode) {
+            _savedUseMachinesFile = useMachinesCheckbox.checked;
+        }
+        _wasPolicyMode = true;
+        useMachinesCheckbox.checked = false;
+        useMachinesCheckbox.disabled = true;
+        if (toggleRow) toggleRow.style.opacity = '0.55';
+        if (toggleLabel) toggleLabel.style.pointerEvents = 'none';
+        targetsList.innerHTML = '';
+        manual.style.display = 'none';
+        addBtn.style.display = 'none';
+        return;
+    }
+
+    if (_wasPolicyMode) {
+        useMachinesCheckbox.checked = _savedUseMachinesFile;
+    }
+    _wasPolicyMode = false;
+    useMachinesCheckbox.disabled = false;
+    if (toggleRow) toggleRow.style.opacity = '';
+    if (toggleLabel) toggleLabel.style.pointerEvents = '';
+    addBtn.style.display = '';
+    manual.style.display = useMachinesCheckbox.checked ? 'none' : 'block';
+}
 
 // ---- Sidebar nav ----
 document.querySelectorAll('.sidebar-link').forEach(link => {
@@ -31,6 +89,7 @@ document.getElementById('analysis_mode_select').addEventListener('change', funct
     const isPolicy = this.value === 'policyid';
     document.getElementById('policyid_row').classList.toggle('hidden', !isPolicy);
     document.getElementById('direction_row').classList.toggle('hidden', isPolicy);
+    syncTargetVisibility();
 });
 
 document.getElementById('proto_enabled').addEventListener('change', e => {
@@ -52,14 +111,12 @@ function addTargetRow(ip, mask) {
 document.getElementById('add-target-btn').addEventListener('click', () => addTargetRow());
 
 document.getElementById('use_machines_file').addEventListener('change', e => {
-    const manual = document.getElementById('manual-targets');
     if (e.target.checked) {
-        manual.style.display = 'none';
         loadMachinesFile();
     } else {
         document.getElementById('targets-list').innerHTML = '';
-        manual.style.display = 'block';
     }
+    syncTargetVisibility();
 });
 
 async function loadMachinesFile() {
@@ -70,12 +127,12 @@ async function loadMachinesFile() {
         list.innerHTML = '';
         if (data.ips && data.ips.length > 0) {
             data.ips.forEach(ip => addTargetRow(ip, '/32'));
-            document.getElementById('manual-targets').style.display = 'none';
         }
+        syncTargetVisibility();
     } catch (err) { console.error(err); }
 }
 
-document.getElementById('manual-targets').style.display = 'block';
+syncTargetVisibility();
 
 // ---- Run ----
 document.getElementById('run-btn').addEventListener('click', runAnalysis);
@@ -127,6 +184,7 @@ async function runAnalysis() {
 
     const directions = analysisMode === 'policyid' ? ['policy'] :
                        direction === 'all' ? ['inbound', 'outbound'] : [direction];
+    const parsedPolicyIds = parsePolicyIds(document.getElementById('policyid').value);
 
     // Определяем layout сетки: слоты = воркеры (максимум 4)
     const activeSlots = Math.min(workers, 4);
@@ -135,6 +193,7 @@ async function runAnalysis() {
     // Создаём пул терминалов (максимум workers штук)
     _terminalPool = [];
     _activeTerminals = {};
+    _pendingBroadcastMessages = [];
 
     for (let i = 0; i < activeSlots; i++) {
         _terminalPool.push({ el: null, ip: null, direction: null, terminal: null, free: true, status: null });
@@ -142,15 +201,16 @@ async function runAnalysis() {
 
     const payload = {
         time_mode: timeMode,
-        time_value: timeMode === 'days' ? +document.getElementById('time_hours').value : +document.getElementById('time_hours').value,
-        start_time: document.getElementById('start_time').value || null,
-        end_time: document.getElementById('end_time').value || null,
+        time_value: +document.getElementById('time_hours').value,
+        start_time: normalizeDateTimeLocal(document.getElementById('start_time').value),
+        end_time: normalizeDateTimeLocal(document.getElementById('end_time').value),
         analysis_mode: analysisMode,
         direction: direction,
         exclude_internal: document.getElementById('exclude_internal').checked,
         use_machines_file: useMachines,
         targets: useMachines ? [] : targetIps,
-        policyid: analysisMode === 'policyid' ? (+document.getElementById('policyid').value || null) : null,
+        policyid: analysisMode === 'policyid' && parsedPolicyIds.length ? parsedPolicyIds[0] : null,
+        policyids: analysisMode === 'policyid' ? parsedPolicyIds : null,
         proto_enabled: document.getElementById('proto_enabled').checked,
         ports: document.getElementById('ports').value,
         smart_action: document.getElementById('smart_action').value,
@@ -165,6 +225,7 @@ async function runAnalysis() {
             devname: document.getElementById('col_devname').checked,
             smart_action: document.getElementById('col_smart_action').checked,
         },
+        workers: workers,
         output_format: document.getElementById('output_format_select').value,
     };
 
@@ -174,6 +235,22 @@ async function runAnalysis() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
+        if (!response.ok) {
+            let errText = 'Request failed';
+            try {
+                const errJson = await response.json();
+                if (errJson.detail) {
+                    errText = typeof errJson.detail === 'string'
+                        ? errJson.detail
+                        : JSON.stringify(errJson.detail, null, 2);
+                } else {
+                    errText = JSON.stringify(errJson, null, 2);
+                }
+            } catch (e) {
+                errText = await response.text();
+            }
+            throw new Error(errText || ('HTTP ' + response.status));
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
@@ -234,15 +311,21 @@ function acquireTerminal(ip, direction) {
 }
 
 function activateSlot(slot, ip, direction) {
+    const label = arguments[3] || `${ip} [${direction}]`;
+    const slotKey = arguments[4] || ip;
     slot.free = false;
     slot.ip = ip;
     slot.direction = direction;
+    slot.slotKey = slotKey;
     slot.status = 'running';
-    const key = ip + ':' + direction;
-    const term = createTerminal(document.getElementById('worker-terminals'), '🖥', `${ip} [${direction}]`);
+    const key = slotKey;
+    const term = createTerminal(document.getElementById('worker-terminals'), '🖥', label);
     slot.el = term.el;
     slot.terminal = term;
     _activeTerminals[key] = slot;
+    if (_pendingBroadcastMessages.length > 0) {
+        _pendingBroadcastMessages.forEach(message => appendToTerminal(slot, message));
+    }
     return slot;
 }
 
@@ -255,6 +338,7 @@ function releaseTerminal(slot) {
     slot.free = true;
     slot.ip = null;
     slot.direction = null;
+    slot.slotKey = null;
     slot.status = null;
     Object.keys(_activeTerminals).forEach(k => {
         if (_activeTerminals[k] === slot) delete _activeTerminals[k];
@@ -269,10 +353,34 @@ function resetTerminals() {
         s.free = true;
         s.ip = null;
         s.direction = null;
+        s.slotKey = null;
         s.status = null;
     });
     _activeTerminals = {};
     document.getElementById('worker-terminals').innerHTML = '';
+    _pendingBroadcastMessages = [];
+}
+
+function appendToTerminal(slot, message, status) {
+    if (!slot || !slot.terminal) return;
+    slot.terminal.log.textContent += message + '\n';
+    slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
+    if (status) slot.terminal.setStatus(status);
+}
+
+function getEventSlotKey(ev) {
+    return ev.slot_key || ev.ip || ev.worker_id || ev.label || null;
+}
+
+function findSlotForEvent(ev) {
+    const slotKey = getEventSlotKey(ev);
+    if (slotKey && _activeTerminals[slotKey]) {
+        return _activeTerminals[slotKey];
+    }
+    if (slotKey) {
+        return Object.values(_activeTerminals).find(s => s.slotKey === slotKey || s.ip === slotKey);
+    }
+    return null;
 }
 
 // ---- Создание терминала воркера ----
@@ -326,43 +434,50 @@ function handleEvent(ev) {
         _currentRequestId = ev.request_id;
         return;
     }
-    if (ev.type === 'worker_start') {
-        const slot = acquireTerminal(ev.ip, ev.direction);
+    if (ev.type === 'job_started') {
+        const slots = Object.values(_activeTerminals);
+        if (slots.length === 0) {
+            _pendingBroadcastMessages.push(ev.message);
+        } else {
+            slots.forEach(s => appendToTerminal(s, ev.message));
+        }
+    } else if (ev.type === 'worker_started' || ev.type === 'worker_start') {
+        const slotKey = getEventSlotKey(ev) || ev.ip;
+        const direction = ev.direction || 'worker';
+        const label = ev.label || `${ev.ip} [${direction}]`;
+        const slot = acquireTerminal(slotKey, direction, label, slotKey);
         if (slot && slot.terminal) {
             slot.terminal.setStatus('running');
+            if (ev.message) appendToTerminal(slot, ev.message, 'running');
         }
-    } else if (ev.type === 'worker_done') {
-        const key = ev.ip + ':' + ev.direction;
-        const slot = _activeTerminals[key];
+    } else if (ev.type === 'worker_finished' || ev.type === 'worker_done') {
+        const slot = findSlotForEvent(ev) || _activeTerminals[(ev.ip || '') + ':' + (ev.direction || '')];
         if (slot && slot.terminal) {
             slot.status = 'done';
+            if (ev.message) appendToTerminal(slot, ev.message);
             slot.terminal.setStatus('done');
         }
-    } else if (ev.type === 'progress') {
-        const ip = ev.ip || null;
-        if (ip) {
-            const slot = Object.values(_activeTerminals).find(s => s.ip === ip);
-            if (slot && slot.terminal) {
-                slot.terminal.log.textContent += ev.message + '\n';
-                slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
-                slot.terminal.setStatus('running');
-            }
+    } else if (ev.type === 'message' || ev.type === 'progress' || ev.type === 'segment_started' ||
+               ev.type === 'fetch_progress' || ev.type === 'aggregation_started' ||
+               ev.type === 'report_started' || ev.type === 'logout_started' || ev.type === 'logout_finished') {
+        const slot = findSlotForEvent(ev);
+        if (slot) {
+            appendToTerminal(slot, ev.message, 'running');
+        } else if (ev.ip || ev.slot_key || ev.worker_id || ev.label) {
+            _pendingBroadcastMessages.push(ev.message);
         } else {
-            Object.values(_activeTerminals).forEach(s => {
-                if (s.terminal) {
-                    s.terminal.log.textContent += ev.message + '\n';
-                    s.terminal.log.scrollTop = s.terminal.log.scrollHeight;
-                }
-            });
+            const slots = Object.values(_activeTerminals);
+            if (slots.length === 0) {
+                _pendingBroadcastMessages.push(ev.message);
+            } else {
+                slots.forEach(s => appendToTerminal(s, ev.message));
+            }
         }
     } else if (ev.type === 'direction') {
-        const ip = ev.ip;
-        if (ip) {
-            const slot = Object.values(_activeTerminals).find(s => s.ip === ip);
-            if (slot && slot.terminal) {
-                slot.terminal.log.textContent += ev.message + '\n';
-                slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
-            }
+        const slot = findSlotForEvent(ev);
+        if (slot && slot.terminal) {
+            slot.terminal.log.textContent += ev.message + '\n';
+            slot.terminal.log.scrollTop = slot.terminal.log.scrollHeight;
         }
     } else if (ev.type === 'done') {
         _currentRequestId = null;
@@ -409,7 +524,6 @@ function handleEvent(ev) {
             const btn = document.createElement('button');
             btn.className = 'result-tab-btn';
             let label = dir;
-            // Убираем расширение и префикс направления для читаемости
             if (label.endsWith('.csv')) {
                 label = label.replace('.csv', '') + ' (CSV)';
             } else if (label.endsWith('.txt')) {
@@ -425,21 +539,40 @@ function handleEvent(ev) {
         });
 
         if (!perIp && dirKeys.length > 0) rc.textContent = texts[dirKeys[0]];
-    } else if (ev.type === 'error') {
+    } else if (ev.type === 'cancelled') {
         _currentRequestId = null;
         Object.values(_activeTerminals).forEach(s => {
             if (s.terminal) {
-                s.terminal.log.textContent += '\n❌ ' + ev.message;
-                s.terminal.setStatus('error');
+                appendToTerminal(s, '\n⏹ ' + ev.message, 'done');
+                s.terminal.setStatus('done');
             }
         });
         if (Object.keys(_activeTerminals).length === 0) {
             const container = document.getElementById('worker-terminals');
-            container.innerHTML = '<div class="worker-terminal"><pre class="worker-terminal-log">❌ ' + escHtml(ev.message) + '</pre></div>';
+            container.innerHTML = '<div class="worker-terminal"><div class="worker-terminal-header"><span class="status-dot"></span><span class="terminal-label">Остановлено</span></div><pre class="worker-terminal-log">' + escHtml(ev.message) + '</pre></div>';
+        }
+        document.getElementById('progress-panel').classList.add('hidden');
+        document.getElementById('idle-panel').classList.remove('hidden');
+    } else if (ev.type === 'error') {
+        _currentRequestId = null;
+        Object.values(_activeTerminals).forEach(s => {
+            if (s.terminal) {
+                appendToTerminal(s, '\n❌ ' + ev.message, 'error');
+            }
+        });
+        if (Object.keys(_activeTerminals).length === 0) {
+            _pendingBroadcastMessages.push('❌ ' + ev.message);
+            const container = document.getElementById('worker-terminals');
+            container.innerHTML = '<div class="worker-terminal"><div class="worker-terminal-header"><span class="status-dot error"></span><span class="terminal-label">Ошибка</span></div><pre class="worker-terminal-log">' + escHtml(ev.message) + '</pre></div>';
         }
         document.getElementById('progress-panel').classList.add('hidden');
         document.getElementById('result-panel').classList.remove('hidden');
         document.getElementById('result-content').textContent = ev.message;
+    } else if (ev.type === 'timeout') {
+        const slots = Object.values(_activeTerminals);
+        if (slots.length > 0) {
+            slots.forEach(s => appendToTerminal(s, '… still running, waiting for next update'));
+        }
     }
 }
 
@@ -589,10 +722,10 @@ function restoreFormState(state) {
         document.getElementById('time_hours').value = state.time_value;
     }
     if (state.start_time) {
-        document.getElementById('start_time').value = state.start_time;
+        document.getElementById('start_time').value = toDateTimeLocalValue(state.start_time);
     }
     if (state.end_time) {
-        document.getElementById('end_time').value = state.end_time;
+        document.getElementById('end_time').value = toDateTimeLocalValue(state.end_time);
     }
     
     // Режим анализа
@@ -606,7 +739,11 @@ function restoreFormState(state) {
         document.getElementById('direction_select').value = state.direction;
     }
     if (state.policyid !== undefined && state.policyid !== null) {
-        document.getElementById('policyid').value = state.policyid;
+        document.getElementById('policyid').value = Array.isArray(state.policyids) && state.policyids.length
+            ? state.policyids.join(',')
+            : state.policyid;
+    } else if (Array.isArray(state.policyids) && state.policyids.length) {
+        document.getElementById('policyid').value = state.policyids.join(',');
     }
     
     // Формат
@@ -623,13 +760,10 @@ function restoreFormState(state) {
     if (state.use_machines_file !== undefined) {
         const machinesCheckbox = document.getElementById('use_machines_file');
         machinesCheckbox.checked = state.use_machines_file;
-        const manual = document.getElementById('manual-targets');
         if (state.use_machines_file) {
-            manual.style.display = 'none';
             loadMachinesFile();
         } else {
             document.getElementById('targets-list').innerHTML = '';
-            manual.style.display = 'block';
             // Восстанавливаем targets
             if (state.targets && state.targets.length > 0) {
                 state.targets.forEach(t => addTargetRow(t.ip, t.mask || '/32'));
@@ -683,6 +817,8 @@ function restoreFormState(state) {
             }, 800);
         }
     });
+
+    syncTargetVisibility();
 }
 
 // ---- Restore partial form state from CMD line (fallback for old history entries) ----
@@ -744,6 +880,8 @@ function restoreFormStateFromCmd(cmd, timeRange, smartAction, hasPolicy, hasInbo
             document.getElementById('policyid').value = polMatch[1];
         }
     }
+
+    syncTargetVisibility();
 }
 
 // ---- Settings ----
@@ -759,6 +897,7 @@ async function loadSettings() {
         document.getElementById('set_max_matched_logs').value = d.max_matched_logs || 200000;
         document.getElementById('set_max_workers').value = d.max_workers || 1;
         document.getElementById('set_split_mode').value = d.session_split_mode || 'ip';
+        document.getElementById('set_disable_reverse_dns').checked = !!d.disable_reverse_dns;
     } catch (err) { console.error(err); }
 }
 
@@ -772,6 +911,7 @@ document.getElementById('save-settings-btn').addEventListener('click', async () 
         max_matched_logs: +document.getElementById('set_max_matched_logs').value,
         max_workers: +document.getElementById('set_max_workers').value,
         session_split_mode: document.getElementById('set_split_mode').value,
+        disable_reverse_dns: document.getElementById('set_disable_reverse_dns').checked,
     };
     const pwd = document.getElementById('set_faz_password').value;
     if (pwd) p.faz_password = pwd;

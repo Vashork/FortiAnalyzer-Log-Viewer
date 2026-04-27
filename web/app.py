@@ -3,13 +3,11 @@
 import os
 import sys
 import json
-import csv
-import io
 import logging
 import asyncio
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
@@ -17,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Р”РѕР±Р°РІР»СЏРµРј РєРѕСЂРµРЅСЊ РїСЂРѕРµРєС‚Р° РІ path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -26,7 +24,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config import (
     MACHINES_FILE,
     INTERNAL_IPS_FILE,
-    PORTS_FILE,
     LOGS_DIR,
     RESULTS_DIR,
     COLUMNS_CONFIG,
@@ -35,17 +32,13 @@ from config import (
     get_dynamic_max_task_hours,
     get_dynamic_max_matched_logs,
     get_dynamic_split_mode,
+    get_dynamic_reverse_dns_enabled,
     reload_env,
     ensure_directories,
     validate_config,
 )
-from utils.network import load_machines, load_ports
-from client.faz_client import FortiAnalyzerClient
-from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
-from analyzer.time_range_analyzer import (
-    analyze_logs_time_split,
-    analyze_policyid_logs_time_split,
-)
+from utils.network import load_machines
+from web.analysis_scheduler import AnalysisCancelled, run_analysis_request
 
 # ========================
 # Р›РѕРіРёСЂРѕРІР°РЅРёРµ РІРµР±-СЃРµСЂРІРµСЂР°
@@ -101,12 +94,34 @@ class AnalysisRequest(BaseModel):
     use_machines_file: bool = True
     targets: List[TargetHost] = []
     policyid: Optional[int] = None
+    policyids: Optional[List[int]] = None
     proto_enabled: bool = False
     ports: str = ""
     smart_action: str = "all"
     columns: Optional[dict] = None
     workers: Optional[int] = None
     output_format: str = "txt"  # txt | csv | both
+
+    @field_validator("policyids", mode="before")
+    @classmethod
+    def normalize_policyids(cls, value):
+        if value in (None, "", []):
+            return None
+        if isinstance(value, int):
+            return [value]
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            if not parts:
+                return None
+            return [int(p) for p in parts]
+        if isinstance(value, list):
+            normalized = []
+            for item in value:
+                if item in (None, ""):
+                    continue
+                normalized.append(int(item))
+            return normalized or None
+        raise ValueError("policyids must be a list of integers or comma-separated string")
 
 
 class SettingsUpdate(BaseModel):
@@ -120,39 +135,9 @@ class SettingsUpdate(BaseModel):
     max_matched_logs: Optional[int] = None
     max_workers: Optional[int] = None
     session_split_mode: Optional[str] = None  # "ip" или "time"
+    disable_reverse_dns: Optional[bool] = None
     columns: Optional[dict] = None
     output_format: Optional[str] = None
-
-
-# ========================
-# РҐРµР»РїРµСЂС‹
-# ========================
-
-def load_internal_ips() -> set:
-    internal_file = Path(INTERNAL_IPS_FILE)
-    if internal_file.exists():
-        return set(load_machines(str(internal_file)))
-    return set()
-
-
-def expand_targets(targets: List[TargetHost]) -> List[str]:
-    import ipaddress
-    ips = []
-    for t in targets:
-        try:
-            if "/" in t.ip:
-                network = ipaddress.IPv4Network(t.ip, strict=False)
-                ips.extend([str(ip) for ip in network])
-            elif t.mask and t.mask != "/32":
-                cidr = f"{t.ip}{t.mask}"
-                network = ipaddress.IPv4Network(cidr, strict=False)
-                ips.extend([str(ip) for ip in network])
-            else:
-                ipaddress.IPv4Address(t.ip)
-                ips.append(t.ip)
-        except Exception as e:
-            logger.warning(f"Invalid target {t.ip}{t.mask}: {e}")
-    return ips
 
 
 def parse_history() -> List[dict]:
@@ -258,6 +243,7 @@ def update_env_file(updates: dict):
 
     lines = env_path.read_text(encoding="utf-8").splitlines()
     new_lines = []
+    applied_keys = set()
 
     for line in lines:
         stripped = line.strip()
@@ -272,68 +258,19 @@ def update_env_file(updates: dict):
             if "#" in line:
                 comment = "  " + line.split("#", 1)[1]
             new_lines.append(f"{key}={val}{comment}")
+            applied_keys.add(key)
         else:
             new_lines.append(line)
+
+    for key, value in updates.items():
+        if key in applied_keys:
+            continue
+        val = _sanitize_env_value(str(value))
+        new_lines.append(f"{key}={val}")
 
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     reload_env()
     logger.info(f"Settings updated: {list(updates.keys())}")
-
-
-def text_to_csv(text: str) -> str:
-    """РљРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ С‚РµРєСЃС‚РѕРІС‹Р№ РѕС‚С‡С‘С‚ РІ CSV."""
-    if not text or text.strip() == "NO DATA":
-        return "NO DATA"
-
-    lines = text.strip().split("\n")
-    csv_output = io.StringIO()
-    writer = csv.writer(csv_output)
-
-    header_written = False
-    for line in lines:
-        # РџСЂРѕРїСѓСЃРєР°РµРј СЂР°Р·РґРµР»РёС‚РµР»Рё Рё Р·Р°РіРѕР»РѕРІРєРё СЃРµРєС†РёР№
-        if line.startswith("=") or line.startswith("-") or not line.strip():
-            continue
-        if line.startswith("Total "):
-            writer.writerow([line.strip()])
-            continue
-
-        # Р Р°Р·РґРµР»СЏРµРј РїРѕ РґРІРѕР№РЅС‹Рј РїСЂРѕР±РµР»Р°Рј (РєР°Рє РІ РѕС‚С‡С‘С‚Рµ)
-        parts = [p.strip() for p in line.split("  ") if p.strip()]
-        if not parts:
-            continue
-
-        if not header_written:
-            writer.writerow(parts)
-            header_written = True
-        else:
-            writer.writerow(parts)
-
-    return csv_output.getvalue()
-
-
-def append_history_simple(text: str, start_time: str, end_time: str, cmd: str, filename: str, state_json: str = None):
-    history_path = Path(RESULTS_DIR) / "history.txt"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-
-    header = (
-        f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n"
-        f"CMD: {cmd}\n"
-        f"TIME: {start_time} в†’ {end_time}\n"
-        f"SMART_ACTION={os.getenv("SMART_ACTION", "all")} | FILTER_MODE={os.getenv("FILTER_MODE", "faz")}\n"
-        f"FILE: {filename}\n"
-    )
-
-    # Добавляем JSON-состояние, если оно есть
-    if state_json:
-        header += f"STATE_JSON: {state_json}\n"
-
-    header += f"{'-' * 60}\n"
-
-    with open(history_path, "a", encoding="utf-8") as f:
-        f.write(header)
-        f.write(text.rstrip() + "\n")
-
 
 # ========================
 # SSE РїСЂРѕРіСЂРµСЃСЃ
@@ -350,18 +287,16 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     _progress_queues[request_id] = queue
     _cancel_flags[request_id] = False  # флаг отмены
 
-    def progress(msg: str, ip: str = None):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "message": msg, "ip": ip})
-
-    def worker_start(ip: str, direction: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "worker_start", "ip": ip, "direction": direction})
-
-    def worker_done_event(ip: str, direction: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "worker_done", "ip": ip, "direction": direction})
+    def emit(event: dict):
+        loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def done(result: dict):
         _cancel_flags.pop(request_id, None)  # cleanup
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
+
+    def cancelled(message: str):
+        _cancel_flags.pop(request_id, None)
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "cancelled", "message": message})
 
     def error(msg: str):
         _cancel_flags.pop(request_id, None)  # cleanup
@@ -371,320 +306,11 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
         return _cancel_flags.get(request_id, False)
 
     def run():
-        import threading
         try:
-            reload_env()
-
-            if request.time_mode == "exact" and request.start_time and request.end_time:
-                start_time = request.start_time
-                end_time = request.end_time
-            else:
-                hours = request.time_value * 24 if request.time_mode == "days" else request.time_value
-                end_dt = datetime.now()
-                start_dt = end_dt - timedelta(hours=hours)
-                start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-                end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-            progress(f"Analyzing: {start_time} в†’ {end_time}")
-
-            target_ips = []
-            if request.use_machines_file:
-                machines_path = Path(MACHINES_FILE)
-                if machines_path.exists():
-                    target_ips = load_machines(str(machines_path))
-                    progress(f"Loaded {len(target_ips)} targets from machines.txt")
-                else:
-                    error("machines.txt not found in resources/")
-                    return
-            else:
-                target_ips = expand_targets(request.targets) if request.targets else []
-
-            exclude_ips = load_internal_ips() if request.exclude_internal else set()
-            target_ips = [ip for ip in target_ips if ip not in exclude_ips]
-
-            if not target_ips and request.analysis_mode != "policyid":
-                error("No target IPs after expansion and exclusion")
-                return
-
-            if is_cancelled():
-                progress("⏹ Analysis cancelled by user")
-                return
-
-            ports = [p.strip() for p in request.ports.split(",") if p.strip()] if request.proto_enabled else None
-
-            if request.columns:
-                import config
-                for k, v in request.columns.items():
-                    if k in config.COLUMNS_CONFIG:
-                        config.COLUMNS_CONFIG[k] = v
-
-            import config
-            config.SMART_ACTION = request.smart_action.lower()
-
-            results_dir = Path(RESULTS_DIR)
-            results_dir.mkdir(parents=True, exist_ok=True)
-
-            if request.analysis_mode == "policyid" and request.policyid is not None:
-                split_mode = get_dynamic_split_mode()
-                workers = request.workers or get_dynamic_workers()
-
-                if is_cancelled():
-                    progress("⏹ Analysis cancelled by user")
-                    return
-
-                if split_mode == "time" and workers > 1:
-                    # ===== TIME SPLIT MODE для PolicyID =====
-                    # ВНИМАНИЕ: не создаём главный клиент — воркеры создают свои сессии сами
-                    progress(f"PolicyID mode: policyid={request.policyid} (time-split, {workers} workers)")
-
-                    # Создаём терминалы для воркеров
-                    for w_id in range(workers):
-                        worker_start(f"W{w_id}", "policy")
-
-                    # Создаём "пустой" клиент только для передачи кредов (без логина)
-                    main_client = FortiAnalyzerClient(
-                        url=os.getenv("FORTIANALYZER_URL"),
-                        username=os.getenv("FORTIANALYZER_USERNAME"),
-                        password=os.getenv("FORTIANALYZER_PASSWORD"),
-                    )
-                    try:
-                        text = analyze_policyid_logs_time_split(
-                            main_client=main_client,
-                            target_ips=target_ips,
-                            policyid=request.policyid,
-                            start_time=start_time, end_time=end_time,
-                            exclude_ips=list(exclude_ips),
-                            batch_size=get_dynamic_batch_size(),
-                            ports=ports,
-                            columns=request.columns,
-                            num_workers=workers,
-                            progress=progress,
-                            cancel_check=is_cancelled,
-                        )
-                    finally:
-                        pass  # главный клиент не логинился, logout не нужен
-
-                    # Завершаем воркеры
-                    for w_id in range(workers):
-                        worker_done_event(f"W{w_id}", "policy")
-
-                    if not text:
-                        text = "NO DATA\n"
-                    text = str(text)
-                else:
-                    # ===== IP SPLIT MODE (старая логика) =====
-                    progress(f"PolicyID mode: policyid={request.policyid}")
-                    text = _faz_search_wrapper(
-                        progress=progress,
-                        faz_url=os.getenv("FORTIANALYZER_URL"),
-                        faz_user=os.getenv("FORTIANALYZER_USERNAME"),
-                        faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
-                        target_ips=target_ips,
-                        exclude_ips=list(exclude_ips),
-                        start_time=start_time, end_time=end_time,
-                        batch_size=get_dynamic_batch_size(), ports=ports,
-                        policyid=request.policyid, columns=request.columns,
-                        cancel_check=is_cancelled,
-                    )
-                    if text is None:
-                        error("FAZ login failed")
-                        return
-                    if not str(text).strip():
-                        text = "NO DATA\n"
-                    text = str(text)
-
-                _save_result(text, progress, results_dir, f"policy_{request.policyid}",
-                               start_time, end_time, f"policyid={request.policyid}",
-                               request.output_format, state_json=json.dumps({
-                                   "time_mode": request.time_mode,
-                                   "time_value": request.time_value,
-                                   "start_time": request.start_time,
-                                   "end_time": request.end_time,
-                                   "analysis_mode": request.analysis_mode,
-                                   "direction": request.direction,
-                                   "policyid": request.policyid,
-                                   "output_format": request.output_format,
-                                   "smart_action": request.smart_action,
-                                   "use_machines_file": request.use_machines_file,
-                                   "targets": [t.model_dump() for t in request.targets],
-                                   "exclude_internal": request.exclude_internal,
-                                   "proto_enabled": request.proto_enabled,
-                                   "ports": request.ports,
-                                   "columns": request.columns,
-                               }, ensure_ascii=False))
-                done({"files": [{"name": f"policy_{request.policyid}.txt", "path": f"policy_{request.policyid}.txt"}],
-                      "texts": {"txt": text}})
-            else:
-                directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
-                workers = request.workers or get_dynamic_workers()
-
-                direction_text = {d: [] for d in directions}
-                per_ip_results = {}
-
-                # Определяем режим дробления
-                split_mode = get_dynamic_split_mode()
-
-                if split_mode == "time" and workers > 1:
-                    # ===== TIME SPLIT MODE =====
-                    # Каждый воркер обрабатывает свои временные сегменты
-                    progress(f"⏱ Time-split mode: {workers} workers, {len(target_ips)} IPs")
-
-                    # Создаём терминалы для воркеров по времени
-                    for w_id in range(workers):
-                        worker_start(f"W{w_id}", "time-split")
-
-                    def process_direction_time_split(direction):
-                        """Обрабатывает одно направление через time splitting."""
-                        # Создаём "пустой" клиент только для передачи кредов (без логина)
-                        # Воркеры создадут свои сессии сами
-                        main_client = FortiAnalyzerClient(
-                            url=os.getenv("FORTIANALYZER_URL"),
-                            username=os.getenv("FORTIANALYZER_USERNAME"),
-                            password=os.getenv("FORTIANALYZER_PASSWORD"),
-                        )
-
-                        try:
-                            reports = analyze_logs_time_split(
-                                main_client=main_client,
-                                target_ips=target_ips,
-                                direction=direction,
-                                start_time=start_time, end_time=end_time,
-                                exclude_ips=list(exclude_ips),
-                                batch_size=get_dynamic_batch_size(),
-                                ports=ports,
-                                columns=request.columns,
-                                num_workers=workers,
-                                progress=progress,
-                                cancel_check=is_cancelled,
-                            )
-                            return direction, reports
-                        finally:
-                            pass  # главный клиент не логинился, logout не нужен
-
-                    for direction in directions:
-                        _, reports = process_direction_time_split(direction)
-                        if reports:
-                            _lock = threading.Lock()
-                            for (local_ip, dir_key), txt in reports.items():
-                                if txt.strip():
-                                    direction_text[dir_key].append(txt)
-                                    with _lock:
-                                        if local_ip not in per_ip_results:
-                                            per_ip_results[local_ip] = {}
-                                        per_ip_results[local_ip][dir_key] = txt
-
-                    # Завершаем воркеры
-                    for w_id in range(workers):
-                        worker_done_event(f"W{w_id}", "time-split")
-
-                elif workers > 1 and len(target_ips) > 1:
-                    # ===== IP SPLIT MODE (старая логика) =====
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    import threading
-                    _ip_lock = threading.Lock()
-                    progress(f"Parallel mode: {workers} workers, {len(target_ips)} IPs")
-
-
-                    def process_ip(ip, direction):
-                        worker_start(ip, direction)
-                        progress(f"▶ Starting: {ip} [{direction}]", ip=ip)
-                        report_dict = _faz_search_wrapper(
-                            progress=progress,
-                            faz_url=os.getenv("FORTIANALYZER_URL"),
-                            faz_user=os.getenv("FORTIANALYZER_USERNAME"),
-                            faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
-                            target_ips=[ip],
-                            exclude_ips=list(exclude_ips),
-                            start_time=start_time, end_time=end_time,
-                            batch_size=get_dynamic_batch_size(), ports=ports,
-                            direction=direction, columns=request.columns,
-                            cancel_check=is_cancelled,
-                        )
-                        if report_dict:
-                            for (_, dir_key), txt in (report_dict or {}).items():
-                                if txt.strip():
-                                    direction_text[dir_key].append(txt)
-                                    # Сохраняем per-IP результат (thread-safe)
-                                    with _ip_lock:
-                                        if ip not in per_ip_results:
-                                            per_ip_results[ip] = {}
-                                        per_ip_results[ip][dir_key] = txt
-                        progress(f"✓ Done: {ip} [{direction}]", ip=ip)
-                        worker_done_event(ip, direction)
-                        return direction_text[dir_key] if direction else []
-
-                    futures_map = {}
-                    with ThreadPoolExecutor(max_workers=workers) as ex:
-                        for direction in directions:
-                            for ip in target_ips:
-                                future = ex.submit(process_ip, ip, direction)
-                                futures_map[future] = (ip, direction)
-
-                    for future in as_completed(futures_map):
-                        ip, direction = futures_map[future]
-                        try:
-                            future.result()  # результаты уже добавлены в direction_text и per_ip_results
-                        except Exception as e:
-                            progress(f"Error for {ip}: {e}")
-                else:
-                    for direction in directions:
-                        progress(f"▶ Direction: {direction}")
-                        for ip in target_ips:
-                            worker_start(ip, direction)
-                            progress(f"  ▶ Starting: {ip}", ip=ip)
-                            report_dict = _faz_search_wrapper(
-                                progress=progress,
-                                faz_url=os.getenv("FORTIANALYZER_URL"),
-                                faz_user=os.getenv("FORTIANALYZER_USERNAME"),
-                                faz_pass=os.getenv("FORTIANALYZER_PASSWORD"),
-                                target_ips=[ip],
-                                exclude_ips=list(exclude_ips),
-                                start_time=start_time, end_time=end_time,
-                                batch_size=get_dynamic_batch_size(), ports=ports,
-                                direction=direction,
-                                cancel_check=is_cancelled,
-                            )
-                            for (_, dir_key), txt in (report_dict or {}).items():
-                                if txt.strip():
-                                    direction_text[dir_key].append(txt)
-                            progress(f"  ✓ Done: {ip}", ip=ip)
-                            worker_done_event(ip, direction)
-
-                all_files = []
-                all_texts = {}
-                
-                # Формируем JSON состояния один раз для всех направлений
-                state_json_str = json.dumps({
-                    "time_mode": request.time_mode,
-                    "time_value": request.time_value,
-                    "start_time": request.start_time,
-                    "end_time": request.end_time,
-                    "analysis_mode": request.analysis_mode,
-                    "direction": request.direction,
-                    "policyid": request.policyid,
-                    "output_format": request.output_format,
-                    "smart_action": request.smart_action,
-                    "use_machines_file": request.use_machines_file,
-                    "targets": [t.model_dump() for t in request.targets],
-                    "exclude_internal": request.exclude_internal,
-                    "proto_enabled": request.proto_enabled,
-                    "ports": request.ports,
-                    "columns": request.columns,
-                }, ensure_ascii=False)
-                
-                for direction in directions:
-                    final_text = "\n\n".join(direction_text[direction]) if direction_text[direction] else "NO DATA\n"
-                    files, texts = _save_result(final_text, progress, results_dir, direction,
-                                   start_time, end_time, f"direction={direction}",
-                                   request.output_format, state_json=state_json_str)
-                    all_files.extend(files)
-                    all_texts.update(texts)
-                # Only include per_ip if we actually have per-IP results (parallel mode)
-                # Send per_ip only if parallel mode populated it with actual data
-                if per_ip_results and len(per_ip_results) >= 1 and all(len(v) > 0 for v in per_ip_results.values()):
-                    all_texts["per_ip"] = per_ip_results
-                done({"files": all_files, "texts": all_texts})
-
+            result = run_analysis_request(request, emit=emit, cancel_check=is_cancelled)
+            done(result)
+        except AnalysisCancelled as exc:
+            cancelled(str(exc))
         except Exception as e:
             import traceback
             logger.exception("Analysis error")
@@ -692,167 +318,6 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-
-
-def _save_result(text, progress, results_dir, name_prefix,
-                   start_time, end_time, cmd_label, output_format, ip=None, state_json=None):
-    """Сохраняет результат (txt + опционально csv), пишет историю, шлёт done."""
-    from utils.output import save_results
-
-    files = []
-    result_data = {}
-
-    txt_file = results_dir / f"{name_prefix}.txt"
-    save_results(text, txt_file)
-    append_history_simple(text, start_time, end_time, cmd_label, txt_file.name, state_json=state_json)
-    files.append({"name": txt_file.name, "path": txt_file.name})
-    result_data[f"{name_prefix}.txt"] = text
-
-    if output_format in ("csv", "both"):
-        csv_text = text_to_csv(text)
-        csv_file = results_dir / f"{name_prefix}.csv"
-        csv_file.write_text(csv_text, encoding="utf-8")
-        files.append({"name": csv_file.name, "path": csv_file.name})
-        result_data[f"{name_prefix}.csv"] = csv_text
-
-    if progress:
-        progress(f"💾 Saved: {name_prefix}.{output_format}", ip=ip)
-    return files, result_data
-
-
-def _faz_search_wrapper(progress, faz_url, faz_user, faz_pass,
-                        target_ips, exclude_ips, start_time, end_time,
-                        batch_size, ports, direction=None, policyid=None, columns=None,
-                        cancel_check=None):
-    """
-    Общий паттерн FAZ search: login → patch → analyze → logout.
-    direction — для direction mode, policyid — для policyid mode.
-    Возвращает (text или dict с результатами).
-    """
-    client = FortiAnalyzerClient(
-        url=faz_url, username=faz_user, password=faz_pass,
-        cancel_check=cancel_check,
-    )
-    if not client.login():
-        return None
-    try:
-        ip_label = target_ips[0] if target_ips and direction else ""
-        _patch_faz_for_sse(client, progress, ip_label=ip_label, cancel_check=cancel_check)
-
-        if policyid is not None:
-            return analyze_policyid_logs(
-                client=client, target_ips=target_ips, policyid=policyid,
-                start_time=start_time, end_time=end_time, exclude_ips=exclude_ips,
-                batch_size=batch_size, ports=ports, columns=columns,
-            )
-        else:
-            return analyze_logs(
-                client=client, target_ips=target_ips, direction=direction,
-                start_time=start_time, end_time=end_time, exclude_ips=exclude_ips,
-                batch_size=batch_size, ports=ports, columns=columns,
-            )
-    finally:
-        client.logout()
-
-
-
-def _patch_faz_for_sse(client: FortiAnalyzerClient, progress, ip_label: str = "", cancel_check=None):
-    """Патчим методы FAZ-клиента для SSE прогресса и поддержки отмены."""
-    import time
-    original_create = client.create_search_task
-    original_wait = client.wait_for_task_completion
-    original_fetch = client.fetch_logs
-
-    def patched_create(filter_str, start, end):
-        if cancel_check and cancel_check():
-            return None
-        result = original_create(filter_str, start, end)
-        if result:
-            progress(f"Created search task: {result}", ip=ip_label)
-        return result
-
-    def patched_wait(task_id, max_wait=300):
-        start_ts = time.time()
-        last_progress_val = -1
-        last_poll_ts = 0
-        poll_interval = 1
-
-        progress("Waiting for FAZ to process search task...", ip=ip_label)
-
-        while time.time() - start_ts < max_wait:
-            if cancel_check and cancel_check():
-                progress("⏹ Cancelled by user", ip=ip_label)
-                client.cancel_search_task(task_id)
-                return False, 0
-
-            now = time.time()
-            if now - last_poll_ts < poll_interval:
-                time.sleep(0.3)
-                continue
-            last_poll_ts = now
-
-            payload = {
-                "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
-                "session": client.session,
-            }
-            try:
-                result = client._post(payload)
-                raw = result.get("result", {})
-                status_code = raw.get("status", {}).get("code", -1)
-                matched = raw.get("matched-logs", 0)
-                prog = raw.get("progress-percent", 0)
-
-                if prog != last_progress_val:
-                    progress(f"Progress: {prog}%", ip=ip_label)
-                    last_progress_val = prog
-                else:
-                    progress(f"Waiting... {prog}% | matched: {matched}", ip=ip_label)
-
-                if status_code == 0 and prog == 100:
-                    progress(f"✅ Task completed. Found {matched} logs", ip=ip_label)
-                    return True, matched
-                if status_code in (0, 1):
-                    continue
-                progress(f"⚠ Task failed with status code: {status_code}", ip=ip_label)
-                return False, 0
-            except Exception as e:
-                progress(f"⚠ Status check error, retrying: {e}", ip=ip_label)
-                time.sleep(3)
-        progress("⚠ Task did not complete within allowed time", ip=ip_label)
-        return False, 0
-
-    def patched_fetch(task_id, total, batch=100):
-        all_logs = []
-        offset = 0
-        while offset < total:
-            if cancel_check and cancel_check():
-                progress(f"  ⏹ Cancelled (fetched {len(all_logs)}/{total})", ip=ip_label)
-                client.cancel_search_task(task_id)
-                return all_logs
-
-            payload = {
-                "id": "123456789", "jsonrpc": "2.0", "method": "get",
-                "params": [{"apiver": 3, "limit": batch, "offset": offset,
-                             "url": f"/logview/adom/root/logsearch/{task_id}"}],
-                "session": client.session,
-            }
-            try:
-                resp = client._post(payload)
-                data = resp.get("result", {}).get("data", [])
-            except Exception:
-                break
-            if not data:
-                break
-            all_logs.extend(data)
-            offset += len(data)
-            pct = int(offset / total * 100) if total else 100
-            progress(f"📥 Fetched {len(all_logs)}/{total} logs ({pct}%)", ip=ip_label)
-        return all_logs
-
-    client.create_search_task = patched_create
-    client.wait_for_task_completion = patched_wait
-    client.fetch_logs = patched_fetch
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -908,13 +373,13 @@ async def analyze_stream(request: AnalysisRequest):
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=120)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") in ("done", "error"):
+                if event.get("type") in ("done", "error", "cancelled"):
                     # Cleanup
                     _progress_queues.pop(request_id, None)
                     break
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type': 'timeout'}, ensure_ascii=False)}\n\n"
-                break
+                continue
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1012,6 +477,7 @@ async def get_settings():
         "max_matched_logs": get_dynamic_max_matched_logs(),
         "max_workers": get_dynamic_workers(),
         "session_split_mode": get_dynamic_split_mode(),
+        "disable_reverse_dns": not get_dynamic_reverse_dns_enabled(),
         "columns": COLUMNS_CONFIG,
     }
 
@@ -1041,6 +507,8 @@ async def update_settings(data: SettingsUpdate):
         val = data.session_split_mode.strip().lower()
         if val in ("ip", "time"):
             updates["SESSION_SPLIT_MODE"] = val
+    if data.disable_reverse_dns is not None:
+        updates["DISABLE_REVERSE_DNS"] = str(bool(data.disable_reverse_dns)).lower()
     if data.columns:
         for k, v in data.columns.items():
             updates[f"COLUMN_{k.upper()}"] = str(v).lower()
@@ -1086,5 +554,3 @@ if __name__ == "__main__":
     logging.config.dictConfig(logging_config)
 
     uvicorn.run(app, host="127.0.0.1", port=8500, log_config=None)
-
-

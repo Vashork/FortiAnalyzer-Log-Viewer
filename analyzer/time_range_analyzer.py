@@ -278,10 +278,10 @@ def analyze_policyid_logs_time_split(
     workers_segments = distribute_segments(segments, num_workers)
 
     def worker_task(worker_id: int, segs: List[Tuple[str, str]]) -> Tuple[int, List[dict]]:
-        label = f"W{worker_id}[policy]"
+        label = f"W{worker_id}"
         total_time_ranges = " | ".join([f"{s[0]} → {s[1]}" for s in segs])
         if progress:
-            progress(f"▶ {label}: {len(segs)} segments")
+            progress(f"▶ {label}[policy]: {len(segs)} segments")
             progress(f"  🕐 Ranges: {total_time_ranges}")
 
         w_client = FortiAnalyzerClient(
@@ -301,7 +301,7 @@ def analyze_policyid_logs_time_split(
                 cancel_check=cancel_check,
             )
             if progress:
-                progress(f"  ✅ {label}: complete ({len(logs)} logs total)")
+                progress(f"  ✅ {label}[policy]: complete ({len(logs)} logs total)")
             return worker_id, logs
         finally:
             w_client.logout()

@@ -30,6 +30,14 @@ class FortiAnalyzerClient:
         response.raise_for_status()
         return response.json()
 
+    @staticmethod
+    def _normalize_result(payload: Dict) -> Dict:
+        """FAZ иногда возвращает result как dict, а иногда как list[dict]."""
+        raw = payload.get("result", {})
+        if isinstance(raw, list):
+            return raw[0] if raw else {}
+        return raw if isinstance(raw, dict) else {}
+
     # ==========================
     #  Authentication
     # ==========================
@@ -176,7 +184,7 @@ class FortiAnalyzerClient:
 
                 try:
                     result = self._post(payload)
-                    raw = result.get("result", {})
+                    raw = self._normalize_result(result)
 
                     status = raw.get("status", {})
                     status_code = status.get("code", -1)
@@ -258,7 +266,7 @@ class FortiAnalyzerClient:
 
                     try:
                         result = self._post(payload)
-                        data = result.get("result", {}).get("data", [])
+                        data = self._normalize_result(result).get("data", [])
 
                     except Exception as e:
                         empty_retry += 1

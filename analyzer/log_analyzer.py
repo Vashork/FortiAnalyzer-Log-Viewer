@@ -481,11 +481,16 @@ def analyze_logs(
     if not all_logs:
         return {}
 
+    if progress:
+        progress(f"🧮 {direction}: aggregating {len(all_logs)} logs", ip=target_ips[0] if len(target_ips) == 1 else None)
+
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
     analyzer = LogAnalyzer(exclude_ips, columns=columns)
     stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
+    if progress:
+        progress(f"📝 {direction}: building report", ip=target_ips[0] if len(target_ips) == 1 else None)
     return analyzer.build_reports_per_local(stats, direction, target_ips)
 
 
@@ -502,6 +507,7 @@ def analyze_policyid_logs(
         batch_size=100,
         ports=None,
         columns=None,
+        progress=None,
 ):
     filter_str = build_policy_faz_filter(policyid, target_ips, ports)
 
@@ -533,9 +539,14 @@ def analyze_policyid_logs(
     if not all_logs:
         return ""
 
+    if progress:
+        progress(f"🧮 policyid={policyid}: aggregating {len(all_logs)} logs")
+
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
     analyzer = LogAnalyzer(exclude_ips, columns=columns)
     stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
+    if progress:
+        progress(f"📝 policyid={policyid}: building report")
     return analyzer.build_policyid_report(stats, policyid)

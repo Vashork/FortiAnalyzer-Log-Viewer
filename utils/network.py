@@ -1,21 +1,29 @@
-# utils/network.py
-
 import socket
 import ipaddress
-from typing import List, Tuple
+from typing import List
+import os
+
+from config import get_dynamic_reverse_dns_enabled
 
 # Кэш для разрешения имён
 _hostname_cache = {}
+_reverse_dns_timeout = float(os.getenv("REVERSE_DNS_TIMEOUT", "0.3"))
 
 
 def resolve_hostname(ip: str) -> str:
     """Разрешает PTR-запись для IP. Возвращает hostname или сам IP, если не найден."""
+    if not get_dynamic_reverse_dns_enabled():
+        return ip
     if ip in _hostname_cache:
         return _hostname_cache[ip]
+    old_timeout = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(_reverse_dns_timeout)
         hostname = socket.gethostbyaddr(ip)[0]
     except (socket.herror, socket.gaierror, OSError):
         hostname = ip
+    finally:
+        socket.setdefaulttimeout(old_timeout)
     _hostname_cache[ip] = hostname
     return hostname
 

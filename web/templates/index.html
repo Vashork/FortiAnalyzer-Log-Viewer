@@ -77,8 +77,8 @@
                             </select>
                         </div>
                         <div class="form-row hidden" id="policyid_row">
-                            <label class="form-label">Policy ID</label>
-                            <input type="number" id="policyid" min="1" placeholder="123" class="form-input">
+                            <label class="form-label">Policy ID(s)</label>
+                            <input type="text" id="policyid" placeholder="123 или 123,124,125" class="form-input">
                         </div>
                         <div class="form-row">
                             <label class="form-label">Формат</label>
@@ -223,6 +223,13 @@
                         <option value="time">По времени (каждый воркер = свой период)</option>
                     </select>
                 </div>
+                <div class="form-row">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="set_disable_reverse_dns">
+                        <span class="checkmark"></span>
+                        Отключить DNS resolve
+                    </label>
+                </div>
             </div>
         </div>
         <div class="card">
@@ -235,6 +242,6 @@
 
 </main>
 
-<script src="/static/script.js?v=15"></script>
+<script src="/static/script.js?v=16"></script>
 </body>
 </html>
