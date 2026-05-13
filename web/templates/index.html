@@ -132,6 +132,7 @@
                                 <label class="checkbox-label"><input type="checkbox" id="col_action"><span class="checkmark"></span>Action</label>
                                 <label class="checkbox-label"><input type="checkbox" id="col_policyid" checked><span class="checkmark"></span>PolicyID</label>
                                 <label class="checkbox-label"><input type="checkbox" id="col_app" checked><span class="checkmark"></span>App</label>
+                                <label class="checkbox-label"><input type="checkbox" id="col_srcport"><span class="checkmark"></span>Srcport</label>
                                 <label class="checkbox-label"><input type="checkbox" id="col_srcintf" checked><span class="checkmark"></span>SrcIntf</label>
                                 <label class="checkbox-label"><input type="checkbox" id="col_dstintf" checked><span class="checkmark"></span>DstIntf</label>
                                 <label class="checkbox-label"><input type="checkbox" id="col_policyname"><span class="checkmark"></span>PolicyName</label>
@@ -142,12 +143,12 @@
                         <details class="columns-details">
                             <summary class="columns-summary">Агрегация отчёта</summary>
                             <div class="columns-grid">
-                                <label class="checkbox-label"><input type="checkbox" id="agg_remote_ip" checked><span class="checkmark"></span>Remote IP</label>
-                                <label class="checkbox-label"><input type="checkbox" id="agg_srcip" checked><span class="checkmark"></span>SRC</label>
-                                <label class="checkbox-label"><input type="checkbox" id="agg_dstip" checked><span class="checkmark"></span>DST</label>
-                                <label class="checkbox-label"><input type="checkbox" id="agg_port" checked><span class="checkmark"></span>Port</label>
-                                <label class="checkbox-label"><input type="checkbox" id="agg_proto" checked><span class="checkmark"></span>Proto</label>
-                                <label class="checkbox-label"><input type="checkbox" id="agg_policyid" checked><span class="checkmark"></span>PolicyID</label>
+                                <label class="checkbox-label" data-agg-field="remote_ip"><input type="checkbox" id="agg_remote_ip" checked><span class="checkmark"></span><span id="agg_remote_ip_label">Remote IP</span></label>
+                                <label class="checkbox-label" data-agg-field="srcip"><input type="checkbox" id="agg_srcip" checked><span class="checkmark"></span>Srcip</label>
+                                <label class="checkbox-label" data-agg-field="dstip"><input type="checkbox" id="agg_dstip" checked><span class="checkmark"></span>Dstip</label>
+                                <label class="checkbox-label" data-agg-field="port"><input type="checkbox" id="agg_port" checked><span class="checkmark"></span>Dstport</label>
+                                <label class="checkbox-label" data-agg-field="proto"><input type="checkbox" id="agg_proto" checked><span class="checkmark"></span>Proto</label>
+                                <label class="checkbox-label" data-agg-field="policyid"><input type="checkbox" id="agg_policyid" checked><span class="checkmark"></span>PolicyID</label>
                             </div>
                         </details>
                     </div>
@@ -253,6 +254,6 @@
 
 </main>
 
-<script src="/static/script.js?v=17"></script>
+<script src="/static/script.js?v=19"></script>
 </body>
 </html>

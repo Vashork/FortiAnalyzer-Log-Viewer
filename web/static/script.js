@@ -10,6 +10,16 @@ let _pendingBroadcastMessages = [];
 let _savedUseMachinesFile = true;
 let _wasPolicyMode = false;
 
+const AGGREGATION_FIELDS = ['remote_ip', 'srcip', 'dstip', 'port', 'proto', 'policyid'];
+const AGGREGATION_DEFAULTS = {
+    direction: { remote_ip: true, srcip: false, dstip: false, port: true, proto: true, policyid: false },
+    policyid: { remote_ip: false, srcip: true, dstip: true, port: true, proto: true, policyid: true },
+};
+const AGGREGATION_VISIBLE_FIELDS = {
+    direction: ['remote_ip', 'port', 'proto'],
+    policyid: ['srcip', 'dstip', 'port', 'proto', 'policyid'],
+};
+
 function normalizeDateTimeLocal(value) {
     if (!value) return null;
     const normalized = value.trim().replace('T', ' ');
@@ -65,6 +75,43 @@ function syncTargetVisibility() {
     manual.style.display = useMachinesCheckbox.checked ? 'none' : 'block';
 }
 
+function getAggregationMode() {
+    return document.getElementById('analysis_mode_select').value === 'policyid' ? 'policyid' : 'direction';
+}
+
+function setAggregationDefaults(mode) {
+    const defaults = AGGREGATION_DEFAULTS[mode] || AGGREGATION_DEFAULTS.direction;
+    AGGREGATION_FIELDS.forEach(field => {
+        const input = document.getElementById('agg_' + field);
+        if (input) input.checked = !!defaults[field];
+    });
+}
+
+function syncAggregationControls(resetDefaults) {
+    const mode = getAggregationMode();
+    const visible = new Set(AGGREGATION_VISIBLE_FIELDS[mode] || []);
+    if (resetDefaults) setAggregationDefaults(mode);
+
+    AGGREGATION_FIELDS.forEach(field => {
+        const input = document.getElementById('agg_' + field);
+        if (!input) return;
+        const label = input.closest('.checkbox-label');
+        if (label) label.classList.toggle('hidden', !visible.has(field));
+    });
+
+    const remoteLabel = document.getElementById('agg_remote_ip_label');
+    if (remoteLabel) {
+        const direction = document.getElementById('direction_select').value;
+        if (direction === 'inbound') {
+            remoteLabel.textContent = 'Remote IP (Srcip)';
+        } else if (direction === 'outbound') {
+            remoteLabel.textContent = 'Remote IP (Dstip)';
+        } else {
+            remoteLabel.textContent = 'Remote IP (Srcip/Dstip)';
+        }
+    }
+}
+
 // ---- Sidebar nav ----
 document.querySelectorAll('.sidebar-link').forEach(link => {
     link.addEventListener('click', () => {
@@ -90,6 +137,11 @@ document.getElementById('analysis_mode_select').addEventListener('change', funct
     document.getElementById('policyid_row').classList.toggle('hidden', !isPolicy);
     document.getElementById('direction_row').classList.toggle('hidden', isPolicy);
     syncTargetVisibility();
+    syncAggregationControls(true);
+});
+
+document.getElementById('direction_select').addEventListener('change', () => {
+    syncAggregationControls(false);
 });
 
 document.getElementById('proto_enabled').addEventListener('change', e => {
@@ -133,6 +185,7 @@ async function loadMachinesFile() {
 }
 
 syncTargetVisibility();
+syncAggregationControls(true);
 
 // ---- Run ----
 document.getElementById('run-btn').addEventListener('click', runAnalysis);
@@ -219,6 +272,7 @@ async function runAnalysis() {
             action: document.getElementById('col_action').checked,
             policyid: document.getElementById('col_policyid').checked,
             app: document.getElementById('col_app').checked,
+            srcport: document.getElementById('col_srcport').checked,
             srcintf: document.getElementById('col_srcintf').checked,
             dstintf: document.getElementById('col_dstintf').checked,
             policyname: document.getElementById('col_policyname').checked,
@@ -800,6 +854,7 @@ function restoreFormState(state) {
             action: 'col_action',
             policyid: 'col_policyid',
             app: 'col_app',
+            srcport: 'col_srcport',
             srcintf: 'col_srcintf',
             dstintf: 'col_dstintf',
             policyname: 'col_policyname',
@@ -829,6 +884,8 @@ function restoreFormState(state) {
                 document.getElementById(checkboxId).checked = value;
             }
         });
+    } else {
+        setAggregationDefaults(getAggregationMode());
     }
     
     // Визуальная обратная связь — подсветим строку на мгновение
@@ -844,6 +901,7 @@ function restoreFormState(state) {
     });
 
     syncTargetVisibility();
+    syncAggregationControls(false);
 }
 
 // ---- Restore partial form state from CMD line (fallback for old history entries) ----
@@ -907,6 +965,7 @@ function restoreFormStateFromCmd(cmd, timeRange, smartAction, hasPolicy, hasInbo
     }
 
     syncTargetVisibility();
+    syncAggregationControls(true);
 }
 
 // ---- Settings ----

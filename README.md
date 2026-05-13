@@ -89,12 +89,13 @@ python main.py --policyid 123 --start "2025-01-01 00:00:00" --end "2025-01-01 23
 | `RESULTS_DIR` | results | Директория результатов |
 | `COLUMN_POLICYID` | true | Колонка PolicyID в отчёте |
 | `COLUMN_APP` | true | Колонка App |
+| `COLUMN_SRCPORT` | false | Колонка Srcport |
 | `COLUMN_SRCINTF` | true | Колонка SrcIntf |
 | `COLUMN_DSTINTF` | true | Колонка DstIntf |
-| `AGGREGATE_REMOTE_IP` | true | Поле Remote IP в ключе агрегации direction-режима |
-| `AGGREGATE_SRCIP` | true | Поле SRC в ключе агрегации policyid-режима |
-| `AGGREGATE_DSTIP` | true | Поле DST в ключе агрегации policyid-режима |
-| `AGGREGATE_PORT` | true | Поле Port в ключе агрегации |
+| `AGGREGATE_REMOTE_IP` | true | Remote IP в direction-режиме: Srcip для inbound, Dstip для outbound |
+| `AGGREGATE_SRCIP` | true | Поле Srcip в ключе агрегации policyid-режима |
+| `AGGREGATE_DSTIP` | true | Поле Dstip в ключе агрегации policyid-режима |
+| `AGGREGATE_PORT` | true | Поле Dstport в ключе агрегации |
 | `AGGREGATE_PROTO` | true | Поле Proto в ключе агрегации |
 | `AGGREGATE_POLICYID` | true | Поле PolicyID в ключе агрегации policyid-режима |
 

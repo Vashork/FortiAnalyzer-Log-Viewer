@@ -16,9 +16,9 @@ from config import (
 LOCAL_AGGREGATION_FIELDS = ("remote_ip", "port", "proto")
 POLICYID_AGGREGATION_FIELDS = ("srcip", "dstip", "port", "proto", "policyid")
 POLICYID_COLUMN_SPECS = {
-    "srcip": ("SRC", 15),
-    "dstip": ("DST", 15),
-    "port": ("Port", 6),
+    "srcip": ("Srcip", 15),
+    "dstip": ("Dstip", 15),
+    "port": ("Dstport", 7),
     "proto": ("Proto", 5),
     "policyid": ("PolicyID", 8),
 }
@@ -138,6 +138,7 @@ class LogAnalyzer:
                     "actions": set(),
                     "policyids": set(),
                     "apps": set(),
+                    "srcports": set(),
                     "srcintfs": set(),
                     "dstintfs": set(),
                     "policynames": set(),
@@ -184,6 +185,8 @@ class LogAnalyzer:
                 entry["policyids"].add(str(log["policyid"]))
             if log.get("app"):
                 entry["apps"].add(log["app"])
+            if log.get("srcport") is not None:
+                entry["srcports"].add(str(log["srcport"]))
             if log.get("srcintf"):
                 entry["srcintfs"].add(log["srcintf"])
             if log.get("dstintf"):
@@ -210,6 +213,8 @@ class LogAnalyzer:
             extra_cols.append(("PolicyID", "policyids"))
         if self.columns.get("app"):
             extra_cols.append(("App", "apps"))
+        if self.columns.get("srcport"):
+            extra_cols.append(("Srcport", "srcports"))
         if self.columns.get("srcintf"):
             extra_cols.append(("SrcIntf", "srcintfs"))
         if self.columns.get("dstintf"):
@@ -236,7 +241,7 @@ class LogAnalyzer:
                     ("Hostname", 30),
                 ])
             if "port" in group_fields:
-                columns.append(("Port", 6))
+                columns.append(("Dstport", 7))
             if "proto" in group_fields:
                 columns.append(("Proto", 5))
             if show_connections:
@@ -267,7 +272,7 @@ class LogAnalyzer:
                         (resolve_hostname(remote), 30),
                     ])
                 if "port" in group_fields:
-                    row_parts.append((group_values["port"], 6))
+                    row_parts.append((group_values["port"], 7))
                 if "proto" in group_fields:
                     row_parts.append((group_values["proto"], 5))
                 if show_connections:
@@ -299,6 +304,7 @@ class LogAnalyzer:
                 "actions": set(),
                 "policyids": set(),
                 "apps": set(),
+                "srcports": set(),
                 "srcintfs": set(),
                 "dstintfs": set(),
                 "policynames": set(),
@@ -343,6 +349,8 @@ class LogAnalyzer:
                 entry["smart_actions"].add(str(sa))
             if log.get("app"):
                 entry["apps"].add(log["app"])
+            if log.get("srcport") is not None:
+                entry["srcports"].add(str(log["srcport"]))
             if log.get("srcintf"):
                 entry["srcintfs"].add(log["srcintf"])
             if log.get("dstintf"):
@@ -368,6 +376,8 @@ class LogAnalyzer:
             extra_cols.append(("PolicyID", "policyids"))
         if self.columns.get("app"):
             extra_cols.append(("App", "apps"))
+        if self.columns.get("srcport"):
+            extra_cols.append(("Srcport", "srcports"))
         if self.columns.get("srcintf"):
             extra_cols.append(("SrcIntf", "srcintfs"))
         if self.columns.get("dstintf"):

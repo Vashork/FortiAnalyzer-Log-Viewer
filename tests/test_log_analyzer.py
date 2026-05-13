@@ -30,12 +30,31 @@ class LogAnalyzerAggregationTests(unittest.TestCase):
 
         stats = analyzer.aggregate_by_policyid(logs, [])
         report = analyzer.build_policyid_report(stats, 100)
-        header = next(line for line in report.splitlines() if line.startswith("SRC"))
+        header = next(line for line in report.splitlines() if line.startswith("Srcip"))
 
         self.assertEqual(len(stats), 1)
         self.assertEqual(stats[("10.0.0.10", "22", "tcp", "100")]["count"], 2)
-        self.assertNotIn("DST", header)
+        self.assertNotIn("Dstip", header)
         self.assertIn("2", report)
+
+    def test_srcport_can_be_added_as_report_column(self):
+        analyzer = LogAnalyzer([], columns={"connections": True, "srcport": True})
+        logs = [
+            {
+                "srcip": "10.0.0.10",
+                "dstip": "10.0.0.20",
+                "srcport": 50123,
+                "dstport": 22,
+                "proto": 6,
+                "policyid": 100,
+            }
+        ]
+
+        stats = analyzer.aggregate_by_policyid(logs, [])
+        report = analyzer.build_policyid_report(stats, 100)
+
+        self.assertIn("Srcport", report)
+        self.assertIn("50123", report)
 
 
 if __name__ == "__main__":

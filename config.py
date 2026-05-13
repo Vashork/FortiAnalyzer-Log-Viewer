@@ -62,6 +62,7 @@ COLUMNS_CONFIG = {
     "action": _get_bool("COLUMN_ACTION", "false"),
     "policyid": _get_bool("COLUMN_POLICYID", "false"),
     "app": _get_bool("COLUMN_APP", "false"),
+    "srcport": _get_bool("COLUMN_SRCPORT", "false"),
     "srcintf": _get_bool("COLUMN_SRCINTF", "false"),
     "dstintf": _get_bool("COLUMN_DSTINTF", "false"),
     "policyname": _get_bool("COLUMN_POLICYNAME", "false"),
