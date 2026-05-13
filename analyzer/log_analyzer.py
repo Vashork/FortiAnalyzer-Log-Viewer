@@ -5,11 +5,38 @@ from datetime import datetime, timedelta
 from utils.network import resolve_hostname
 from config import (
     COLUMNS_CONFIG,
+    AGGREGATION_CONFIG,
     SMART_ACTION,
     FILTER_MODE,
     MAX_TASK_HOURS,
     MAX_MATCHED_LOGS_PER_TASK,
 )
+
+
+LOCAL_AGGREGATION_FIELDS = ("remote_ip", "port", "proto")
+POLICYID_AGGREGATION_FIELDS = ("srcip", "dstip", "port", "proto", "policyid")
+POLICYID_COLUMN_SPECS = {
+    "srcip": ("SRC", 15),
+    "dstip": ("DST", 15),
+    "port": ("Port", 6),
+    "proto": ("Proto", 5),
+    "policyid": ("PolicyID", 8),
+}
+
+
+def _config_bool(config: dict, key: str, default: bool = True) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def _join_values(values) -> str:
+    return ",".join(sorted(str(value) for value in values)) or "-"
 
 # ------------------------------------------
 # PROTOCOL NAMES
@@ -68,9 +95,24 @@ def split_time_range_safe(start_time: str, end_time: str, max_hours: int):
 class LogAnalyzer:
     """Aggregates logs into structured reports."""
 
-    def __init__(self, exclude_ips: List[str], columns: dict = None):
+    def __init__(self, exclude_ips: List[str], columns: dict = None, aggregation: dict = None):
         self.exclude_ips = set(exclude_ips)
         self.columns = columns if columns is not None else COLUMNS_CONFIG
+        self.aggregation = dict(AGGREGATION_CONFIG)
+        if aggregation:
+            self.aggregation.update(aggregation)
+
+    def _local_aggregation_fields(self) -> Tuple[str, ...]:
+        return tuple(
+            field for field in LOCAL_AGGREGATION_FIELDS
+            if _config_bool(self.aggregation, field)
+        )
+
+    def _policyid_aggregation_fields(self) -> Tuple[str, ...]:
+        return tuple(
+            field for field in POLICYID_AGGREGATION_FIELDS
+            if _config_bool(self.aggregation, field)
+        )
 
     # ----------------------------------------------------------
     # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
@@ -85,10 +127,14 @@ class LogAnalyzer:
             remote_field = "dstip"
             port_field = "dstport"
 
-        result: Dict[str, Dict[Tuple[str, str, str], Dict]] = defaultdict(
+        group_fields = self._local_aggregation_fields()
+        target_set = set(target_ips)
+
+        result: Dict[str, Dict[Tuple[str, ...], Dict]] = defaultdict(
             lambda: defaultdict(
                 lambda: {
                     "count": 0,
+                    "remote_ips": set(),
                     "actions": set(),
                     "policyids": set(),
                     "apps": set(),
@@ -107,17 +153,23 @@ class LogAnalyzer:
 
             if not local_ip or not remote_ip:
                 continue
-            if local_ip not in target_ips:
+            if local_ip not in target_set:
                 continue
             if remote_ip in self.exclude_ips:
                 continue
 
             proto = proto_to_name(log.get("proto"))
-            port = log.get(port_field, "-")
-            key = (remote_ip, str(port), proto)
+            port = str(log.get(port_field, "-"))
+            values = {
+                "remote_ip": str(remote_ip),
+                "port": port,
+                "proto": proto,
+            }
+            key = tuple(values[field] for field in group_fields)
             entry = result[local_ip][key]
 
             entry["count"] += 1
+            entry["remote_ips"].add(str(remote_ip))
 
             if log.get("smart_action"):
                 entry["actions"].add(log["smart_action"])
@@ -149,6 +201,7 @@ class LogAnalyzer:
     def build_reports_per_local(self, stats, direction: str, target_ips: List[str]):
         reports: Dict[Tuple[str, str], str] = {}
         show_connections = self.columns.get("connections", True)
+        group_fields = self._local_aggregation_fields()
 
         extra_cols = []
         if self.columns.get("action"):
@@ -176,12 +229,16 @@ class LogAnalyzer:
                 "",
                 ]
 
-            columns = [
-                ("Remote IP", 15),
-                ("Hostname", 30),
-                ("Port", 6),
-                ("Proto", 5),
-            ]
+            columns = []
+            if "remote_ip" in group_fields:
+                columns.extend([
+                    ("Remote IP", 15),
+                    ("Hostname", 30),
+                ])
+            if "port" in group_fields:
+                columns.append(("Port", 6))
+            if "proto" in group_fields:
+                columns.append(("Proto", 5))
             if show_connections:
                 columns.append(("Connections", 11))
             for col, _ in extra_cols:
@@ -195,26 +252,31 @@ class LogAnalyzer:
             total_conns = 0
             uniq_ips = set()
 
-            for (remote, port, proto), d in sorted(
-                    items.items(), key=lambda x: -x[1]["count"]
+            for key, d in sorted(
+                    items.items(), key=lambda x: (-x[1]["count"], x[0])
             ):
-                hostname = resolve_hostname(remote)
+                group_values = dict(zip(group_fields, key))
                 total_conns += d["count"]
-                uniq_ips.add(remote)
+                uniq_ips.update(d.get("remote_ips", set()))
 
-                row_parts = [
-                    (remote, 15),
-                    (hostname, 30),
-                    (port, 6),
-                    (proto, 5),
-                ]
+                row_parts = []
+                if "remote_ip" in group_fields:
+                    remote = group_values["remote_ip"]
+                    row_parts.extend([
+                        (remote, 15),
+                        (resolve_hostname(remote), 30),
+                    ])
+                if "port" in group_fields:
+                    row_parts.append((group_values["port"], 6))
+                if "proto" in group_fields:
+                    row_parts.append((group_values["proto"], 5))
                 if show_connections:
                     row_parts.append((str(d["count"]), 11))
 
                 row = "".join([f"{val:<{width}}  " for val, width in row_parts])
                 for _, field in extra_cols:
                     values = d.get(field) or set()
-                    row += f"{','.join(sorted(values)) or '-':<15}  "
+                    row += f"{_join_values(values):<15}  "
                 lines.append(row)
 
             lines.append("")
@@ -229,10 +291,13 @@ class LogAnalyzer:
     # POLICYID MODE — GLOBAL AGGREGATION
     # ----------------------------------------------------------
     def aggregate_by_policyid(self, logs, target_ips: List[str]):
-        result: Dict[Tuple[str, str, str, str, str], Dict] = defaultdict(
+        group_fields = self._policyid_aggregation_fields()
+
+        result: Dict[Tuple[str, ...], Dict] = defaultdict(
             lambda: {
                 "count": 0,
                 "actions": set(),
+                "policyids": set(),
                 "apps": set(),
                 "srcintfs": set(),
                 "dstintfs": set(),
@@ -258,9 +323,17 @@ class LogAnalyzer:
             proto = proto_to_name(log.get("proto"))
             policyid = str(log.get("policyid")) if log.get("policyid") is not None else "-"
 
-            key = (srcip, dstip, dstport, proto, policyid)
+            values = {
+                "srcip": str(srcip),
+                "dstip": str(dstip),
+                "port": dstport,
+                "proto": proto,
+                "policyid": policyid,
+            }
+            key = tuple(values[field] for field in group_fields)
             entry = result[key]
             entry["count"] += 1
+            entry["policyids"].add(policyid)
 
             # Smart Action: derive from FAZ raw fields
             # Priority: smart_action > utmaction > action
@@ -286,10 +359,13 @@ class LogAnalyzer:
             return ""
 
         show_connections = self.columns.get("connections", True)
+        group_fields = self._policyid_aggregation_fields()
 
         extra_cols = []
         if self.columns.get("action"):
             extra_cols.append(("Action", "actions"))
+        if self.columns.get("policyid") and "policyid" not in group_fields:
+            extra_cols.append(("PolicyID", "policyids"))
         if self.columns.get("app"):
             extra_cols.append(("App", "apps"))
         if self.columns.get("srcintf"):
@@ -310,13 +386,7 @@ class LogAnalyzer:
             "",
             ]
 
-        columns = [
-            ("SRC", 15),
-            ("DST", 15),
-            ("Port", 6),
-            ("Proto", 5),
-            ("PolicyID", 8),
-        ]
+        columns = [POLICYID_COLUMN_SPECS[field] for field in group_fields]
         if show_connections:
             columns.append(("Count", 8))
         for col, _ in extra_cols:
@@ -328,16 +398,14 @@ class LogAnalyzer:
         lines.append(sep)
 
         total_conns = 0
-        for (src, dst, port, proto, pol), d in sorted(
-                stats.items(), key=lambda x: -x[1]["count"]
+        for key, d in sorted(
+                stats.items(), key=lambda x: (-x[1]["count"], x[0])
         ):
+            group_values = dict(zip(group_fields, key))
             total_conns += d["count"]
             row_parts = [
-                (src, 15),
-                (dst, 15),
-                (port, 6),
-                (proto, 5),
-                (pol, 8),
+                (group_values[field], POLICYID_COLUMN_SPECS[field][1])
+                for field in group_fields
             ]
             if show_connections:
                 row_parts.append((str(d["count"]), 8))
@@ -345,7 +413,7 @@ class LogAnalyzer:
             row = "".join([f"{val:<{width}}  " for val, width in row_parts])
             for _, field in extra_cols:
                 values = d.get(field) or set()
-                row += f"{','.join(sorted(values)) or '-':<15}  "
+                row += f"{_join_values(values):<15}  "
             lines.append(row)
 
         lines.append("")
@@ -443,6 +511,7 @@ def analyze_logs(
         batch_size=100,
         ports=None,
         columns=None,
+        aggregation=None,
         progress=None,
 ):
     filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
@@ -487,7 +556,7 @@ def analyze_logs(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips, columns=columns)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
     stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
     if progress:
         progress(f"📝 {direction}: building report", ip=target_ips[0] if len(target_ips) == 1 else None)
@@ -507,6 +576,7 @@ def analyze_policyid_logs(
         batch_size=100,
         ports=None,
         columns=None,
+        aggregation=None,
         progress=None,
 ):
     filter_str = build_policy_faz_filter(policyid, target_ips, ports)
@@ -545,7 +615,7 @@ def analyze_policyid_logs(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips, columns=columns)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
     stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
     if progress:
         progress(f"📝 policyid={policyid}: building report")

@@ -261,6 +261,7 @@ def _build_state_json(request, policy_id: Optional[int] = None) -> str:
         "proto_enabled": request.proto_enabled,
         "ports": request.ports,
         "columns": request.columns,
+        "aggregation": request.aggregation,
     }, ensure_ascii=False)
 
 
@@ -450,7 +451,7 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
 
 def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: CancelCheck, *,
                     target_ips, exclude_ips, start_time, end_time, batch_size, ports,
-                    direction=None, policyid=None, columns=None):
+                    direction=None, policyid=None, columns=None, aggregation=None):
     client = FortiAnalyzerClient(
         url=os.getenv("FORTIANALYZER_URL"),
         username=os.getenv("FORTIANALYZER_USERNAME"),
@@ -474,6 +475,7 @@ def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: 
                 batch_size=batch_size,
                 ports=ports,
                 columns=columns,
+                aggregation=aggregation,
                 progress=progress,
             )
         return analyze_logs(
@@ -486,6 +488,7 @@ def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: 
             batch_size=batch_size,
             ports=ports,
             columns=columns,
+            aggregation=aggregation,
             progress=progress,
         )
     finally:
@@ -574,6 +577,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                 ports=ports,
                 columns=request.columns,
                 num_workers=workers,
+                aggregation=request.aggregation,
                 progress=lambda message, ip=None: emitter.message(
                     message,
                     worker=WorkerRef(worker_id=ip or "policy", label=ip or "policy", slot_key=ip or "policy", direction="policy"),
@@ -611,6 +615,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                     ports=ports,
                     policyid=policy_id,
                     columns=request.columns,
+                    aggregation=request.aggregation,
                 )
                 if text is None:
                     raise RuntimeError("FAZ login failed")
@@ -653,6 +658,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                     ports=ports,
                     policyid=policy_id,
                     columns=request.columns,
+                    aggregation=request.aggregation,
                 )
                 if text is None:
                     raise RuntimeError("FAZ login failed")
@@ -740,6 +746,7 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
                         ports=ports,
                         direction=direction,
                         columns=request.columns,
+                        aggregation=request.aggregation,
                     ) or {}
 
                     with collect_lock:
@@ -828,6 +835,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                     ports=ports,
                     direction=direction,
                     columns=request.columns,
+                    aggregation=request.aggregation,
                 ) or {}
                 with collect_lock:
                     for (_, dir_key), text in report_dict.items():
@@ -866,6 +874,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                         ports=ports,
                         direction=direction,
                         columns=request.columns,
+                        aggregation=request.aggregation,
                     ) or {}
                     for (_, dir_key), text in report_dict.items():
                         if text.strip():

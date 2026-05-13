@@ -225,6 +225,14 @@ async function runAnalysis() {
             devname: document.getElementById('col_devname').checked,
             smart_action: document.getElementById('col_smart_action').checked,
         },
+        aggregation: {
+            remote_ip: document.getElementById('agg_remote_ip').checked,
+            srcip: document.getElementById('agg_srcip').checked,
+            dstip: document.getElementById('agg_dstip').checked,
+            port: document.getElementById('agg_port').checked,
+            proto: document.getElementById('agg_proto').checked,
+            policyid: document.getElementById('agg_policyid').checked,
+        },
         workers: workers,
         output_format: document.getElementById('output_format_select').value,
     };
@@ -800,6 +808,23 @@ function restoreFormState(state) {
         };
         Object.entries(state.columns).forEach(([key, value]) => {
             const checkboxId = columnMap[key];
+            if (checkboxId) {
+                document.getElementById(checkboxId).checked = value;
+            }
+        });
+    }
+
+    if (state.aggregation) {
+        const aggregationMap = {
+            remote_ip: 'agg_remote_ip',
+            srcip: 'agg_srcip',
+            dstip: 'agg_dstip',
+            port: 'agg_port',
+            proto: 'agg_proto',
+            policyid: 'agg_policyid',
+        };
+        Object.entries(state.aggregation).forEach(([key, value]) => {
+            const checkboxId = aggregationMap[key];
             if (checkboxId) {
                 document.getElementById(checkboxId).checked = value;
             }

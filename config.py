@@ -69,6 +69,15 @@ COLUMNS_CONFIG = {
     "smart_action": _get_bool("COLUMN_SMART_ACTION", "false"),
 }
 
+AGGREGATION_CONFIG = {
+    "remote_ip": _get_bool("AGGREGATE_REMOTE_IP", "true"),
+    "srcip": _get_bool("AGGREGATE_SRCIP", "true"),
+    "dstip": _get_bool("AGGREGATE_DSTIP", "true"),
+    "port": _get_bool("AGGREGATE_PORT", "true"),
+    "proto": _get_bool("AGGREGATE_PROTO", "true"),
+    "policyid": _get_bool("AGGREGATE_POLICYID", "true"),
+}
+
 # Максимальная длительность одного FAZ-search task в часах.
 MAX_TASK_HOURS = int(os.getenv("MAX_TASK_HOURS", "4"))
 

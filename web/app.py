@@ -27,6 +27,7 @@ from config import (
     LOGS_DIR,
     RESULTS_DIR,
     COLUMNS_CONFIG,
+    AGGREGATION_CONFIG,
     get_dynamic_workers,
     get_dynamic_batch_size,
     get_dynamic_max_task_hours,
@@ -99,6 +100,7 @@ class AnalysisRequest(BaseModel):
     ports: str = ""
     smart_action: str = "all"
     columns: Optional[dict] = None
+    aggregation: Optional[dict] = None
     workers: Optional[int] = None
     output_format: str = "txt"  # txt | csv | both
 
@@ -137,6 +139,7 @@ class SettingsUpdate(BaseModel):
     session_split_mode: Optional[str] = None  # "ip" или "time"
     disable_reverse_dns: Optional[bool] = None
     columns: Optional[dict] = None
+    aggregation: Optional[dict] = None
     output_format: Optional[str] = None
 
 
@@ -479,6 +482,7 @@ async def get_settings():
         "session_split_mode": get_dynamic_split_mode(),
         "disable_reverse_dns": not get_dynamic_reverse_dns_enabled(),
         "columns": COLUMNS_CONFIG,
+        "aggregation": AGGREGATION_CONFIG,
     }
 
 
@@ -512,6 +516,9 @@ async def update_settings(data: SettingsUpdate):
     if data.columns:
         for k, v in data.columns.items():
             updates[f"COLUMN_{k.upper()}"] = str(v).lower()
+    if data.aggregation:
+        for k, v in data.aggregation.items():
+            updates[f"AGGREGATE_{k.upper()}"] = str(v).lower()
     if updates:
         update_env_file(updates)
     return {"status": "ok", "updated": len(updates)}

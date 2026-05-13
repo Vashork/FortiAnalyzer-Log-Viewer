@@ -196,6 +196,7 @@ def analyze_logs_time_split(
     ports: Optional[List[str]],
     columns: dict,
     num_workers: int,
+    aggregation: Optional[dict] = None,
     progress=None,
     cancel_check=None,  # callable() -> bool
 ) -> Dict[Tuple[str, str], str]:
@@ -244,7 +245,7 @@ def analyze_logs_time_split(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips, columns=columns)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
     stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
     return analyzer.build_reports_per_local(stats, direction, target_ips)
 
@@ -260,6 +261,7 @@ def analyze_policyid_logs_time_split(
     ports: Optional[List[str]],
     columns: dict,
     num_workers: int,
+    aggregation: Optional[dict] = None,
     progress=None,
     cancel_check=None,  # callable() -> bool
 ) -> str:
@@ -333,6 +335,6 @@ def analyze_policyid_logs_time_split(
     if FILTER_MODE == "local":
         all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
 
-    analyzer = LogAnalyzer(exclude_ips, columns=columns)
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
     stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
     return analyzer.build_policyid_report(stats, policyid)
