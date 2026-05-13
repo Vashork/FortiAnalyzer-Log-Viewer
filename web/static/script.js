@@ -703,14 +703,43 @@ async function loadResults() {
         table.classList.remove('hidden'); empty.classList.add('hidden');
         data.files.forEach(f => {
             const tr = document.createElement('tr');
-            tr.innerHTML = '<td>' + f.name + '</td><td>' + f.modified + '</td><td>' + fmtSize(f.size) + '</td><td><button class="btn-small" onclick="viewResult(\'' + f.path + '\')">📖</button> <button class="btn-small" onclick="dlResult(\'' + f.path + '\')">📥</button></td>';
+            tr.innerHTML = '<td>' + escHtml(f.name) + '</td><td>' + escHtml(f.modified) + '</td><td>' + fmtSize(f.size) + '</td><td class="result-actions-cell"></td>';
+            const actions = tr.querySelector('.result-actions-cell');
+            const viewBtn = document.createElement('button');
+            viewBtn.className = 'btn-small';
+            viewBtn.textContent = '📖';
+            viewBtn.title = 'Открыть в веб-форме';
+            viewBtn.addEventListener('click', () => viewResult(f.path));
+
+            const downloadBtn = document.createElement('button');
+            downloadBtn.className = 'btn-small';
+            downloadBtn.textContent = '📥';
+            downloadBtn.title = 'Скачать';
+            downloadBtn.addEventListener('click', () => dlResult(f.path));
+
+            const revealBtn = document.createElement('button');
+            revealBtn.className = 'btn-small';
+            revealBtn.textContent = '📂';
+            revealBtn.title = 'Открыть папку на серверном ПК';
+            revealBtn.addEventListener('click', () => revealResult(f.path));
+
+            actions.appendChild(viewBtn);
+            actions.appendChild(document.createTextNode(' '));
+            actions.appendChild(downloadBtn);
+            actions.appendChild(document.createTextNode(' '));
+            actions.appendChild(revealBtn);
             tbody.appendChild(tr);
         });
     } catch (err) { console.error(err); }
 }
+
+function resultPathUrl(p) {
+    return String(p).split('/').map(encodeURIComponent).join('/');
+}
+
 async function viewResult(p) {
     try {
-        const d = await (await fetch('/api/results/' + p)).json();
+        const d = await (await fetch('/api/results/' + resultPathUrl(p))).json();
         document.getElementById('result-content').textContent = d.content;
         document.querySelector('[data-tab="analyze"]').click();
         document.getElementById('idle-panel').classList.add('hidden');
@@ -719,9 +748,32 @@ async function viewResult(p) {
         document.getElementById('result-panel').classList.remove('hidden');
     } catch (err) { alert(err.message); }
 }
-function dlResult(p) { window.open('/api/results/download/' + p, '_blank'); }
+function dlResult(p) { window.open('/api/results/download/' + resultPathUrl(p), '_blank'); }
+
+async function revealResult(p) {
+    try {
+        const resp = await fetch('/api/results/reveal/' + resultPathUrl(p), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'Failed to open folder');
+        alert(data.message + '\n' + data.path);
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function revealResultsDir() {
+    try {
+        const resp = await fetch('/api/results/reveal', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'Failed to open folder');
+        alert(data.message + '\n' + data.path);
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
 function fmtSize(b) { return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB'; }
-document.getElementById('open-folder-btn').addEventListener('click', () => window.open('/api/results', '_blank'));
+document.getElementById('open-folder-btn').addEventListener('click', revealResultsDir);
 
 // ---- Main page history ----
 async function loadMainHistory() {

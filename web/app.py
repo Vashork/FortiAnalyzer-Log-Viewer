@@ -350,6 +350,11 @@ async def index():
     return FileResponse(TEMPLATES_DIR / "index.html")
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
 # ========================
 # API endpoints
 # ========================
@@ -398,7 +403,7 @@ async def cancel_analysis(request_id: str):
 
 @app.get("/api/results")
 async def list_results():
-    results_dir = Path(RESULTS_DIR)
+    results_dir = _results_dir_path()
     if not results_dir.exists():
         return {"files": []}
     files = []
@@ -416,30 +421,71 @@ async def list_results():
     return {"files": files}
 
 
-@app.get("/api/results/{file_path:path}")
-async def get_result(file_path: str):
-    results_dir = Path(RESULTS_DIR)
+def _resolve_result_path(file_path: str) -> Path:
+    results_dir = _results_dir_path()
     full_path = (results_dir / file_path).resolve()
     try:
-        full_path.relative_to(results_dir.resolve())
+        full_path.relative_to(results_dir)
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return {"content": full_path.read_text(encoding="utf-8"), "name": full_path.name}
+    return full_path
+
+
+def _results_dir_path() -> Path:
+    results_dir = Path(RESULTS_DIR)
+    if not results_dir.is_absolute():
+        results_dir = PROJECT_ROOT / results_dir
+    return results_dir.resolve()
+
+
+def _open_in_explorer(path: Path, select: bool = False):
+    if os.name != "nt":
+        raise HTTPException(status_code=400, detail="Explorer reveal is only supported on Windows")
+
+    import subprocess
+
+    if select:
+        subprocess.Popen(["explorer.exe", "/select,", str(path)])
+    else:
+        subprocess.Popen(["explorer.exe", str(path)])
 
 
 @app.get("/api/results/download/{file_path:path}")
 async def download_result(file_path: str):
-    results_dir = Path(RESULTS_DIR)
-    full_path = (results_dir / file_path).resolve()
-    try:
-        full_path.relative_to(results_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+    full_path = _resolve_result_path(file_path)
     return FileResponse(str(full_path), filename=full_path.name)
+
+
+@app.post("/api/results/reveal/{file_path:path}")
+async def reveal_result(file_path: str):
+    full_path = _resolve_result_path(file_path)
+    _open_in_explorer(full_path, select=True)
+    return {
+        "status": "ok",
+        "message": "Opened Explorer on the server PC",
+        "path": str(full_path),
+    }
+
+
+@app.post("/api/results/reveal")
+async def reveal_results_dir():
+    results_dir = _results_dir_path()
+    if not results_dir.exists():
+        raise HTTPException(status_code=404, detail="Results directory not found")
+    _open_in_explorer(results_dir)
+    return {
+        "status": "ok",
+        "message": "Opened results directory on the server PC",
+        "path": str(results_dir),
+    }
+
+
+@app.get("/api/results/{file_path:path}")
+async def get_result(file_path: str):
+    full_path = _resolve_result_path(file_path)
+    return {"content": full_path.read_text(encoding="utf-8"), "name": full_path.name}
 
 
 @app.get("/api/resources/machines")
