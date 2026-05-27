@@ -1,18 +1,34 @@
 import socket
 import ipaddress
-from typing import List
+from typing import Dict, List, Optional
 import os
 
 from config import get_dynamic_reverse_dns_enabled
 
 # Кэш для разрешения имён
-_hostname_cache = {}
+_hostname_cache: Dict[str, str] = {}
+_last_reverse_dns_enabled: Optional[bool] = None
 _reverse_dns_timeout = float(os.getenv("REVERSE_DNS_TIMEOUT", "0.3"))
+
+
+def clear_hostname_cache() -> None:
+    """Clear cached reverse-DNS lookups."""
+    _hostname_cache.clear()
+
+
+def _is_reverse_dns_enabled() -> bool:
+    global _last_reverse_dns_enabled
+
+    enabled = get_dynamic_reverse_dns_enabled()
+    if _last_reverse_dns_enabled is not None and enabled != _last_reverse_dns_enabled:
+        clear_hostname_cache()
+    _last_reverse_dns_enabled = enabled
+    return enabled
 
 
 def resolve_hostname(ip: str) -> str:
     """Разрешает PTR-запись для IP. Возвращает hostname или сам IP, если не найден."""
-    if not get_dynamic_reverse_dns_enabled():
+    if not _is_reverse_dns_enabled():
         return ip
     if ip in _hostname_cache:
         return _hostname_cache[ip]

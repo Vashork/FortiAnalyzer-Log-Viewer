@@ -1,6 +1,4 @@
-﻿"""FastAPI web-СЃРµСЂРІРµСЂ РґР»СЏ falogviewerv2 (falv2)."""
-
-import os
+﻿import os
 import sys
 import json
 import logging
@@ -38,7 +36,7 @@ from config import (
     ensure_directories,
     validate_config,
 )
-from utils.network import load_machines
+from utils.network import clear_hostname_cache, load_machines
 from web.analysis_scheduler import AnalysisCancelled, run_analysis_request
 
 # ========================
@@ -259,7 +257,7 @@ def update_env_file(updates: dict):
             val = _sanitize_env_value(str(updates[key]))
             comment = ""
             if "#" in line:
-                comment = "  " + line.split("#", 1)[1]
+                comment = "  #" + line.split("#", 1)[1]
             new_lines.append(f"{key}={val}{comment}")
             applied_keys.add(key)
         else:
@@ -535,6 +533,7 @@ async def get_settings():
 @app.put("/api/settings")
 async def update_settings(data: SettingsUpdate):
     updates = {}
+    clear_dns_cache = False
     if data.faz_url is not None:
         updates["FORTIANALYZER_URL"] = data.faz_url
     if data.faz_username is not None:
@@ -559,6 +558,7 @@ async def update_settings(data: SettingsUpdate):
             updates["SESSION_SPLIT_MODE"] = val
     if data.disable_reverse_dns is not None:
         updates["DISABLE_REVERSE_DNS"] = str(bool(data.disable_reverse_dns)).lower()
+        clear_dns_cache = True
     if data.columns:
         for k, v in data.columns.items():
             updates[f"COLUMN_{k.upper()}"] = str(v).lower()
@@ -567,6 +567,9 @@ async def update_settings(data: SettingsUpdate):
             updates[f"AGGREGATE_{k.upper()}"] = str(v).lower()
     if updates:
         update_env_file(updates)
+        if clear_dns_cache:
+            clear_hostname_cache()
+            logger.info("Reverse DNS cache cleared after settings update")
     return {"status": "ok", "updated": len(updates)}
 
 
