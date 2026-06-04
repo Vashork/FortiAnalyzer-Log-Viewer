@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 from config import (
-    RESULTS_DIR,
+    get_results_dir_path,
     BATCH_SIZE,
     MAX_WORKERS,
     DEFAULT_TIME_RANGE_HOURS,
@@ -37,7 +37,7 @@ from utils.output import save_results
 # HISTORY
 # ----------------------------------------------------
 def _append_history(text: str, start_time: str, end_time: str, cmd: str, filename: str):
-    history_path = Path(RESULTS_DIR) / "history.txt"
+    history_path = get_results_dir_path() / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     header = (
@@ -118,7 +118,7 @@ def main():
 
     ports = load_ports("ports.txt") if args.proto else None
 
-    results_dir = Path(RESULTS_DIR)
+    results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # ================= POLICY MODE =================

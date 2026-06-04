@@ -20,10 +20,10 @@ from config import (
     EMPTY_BATCH_LIMIT,
     INTERNAL_IPS_FILE,
     MACHINES_FILE,
-    RESULTS_DIR,
     get_dynamic_batch_size,
     get_dynamic_max_task_hours,
     get_dynamic_workers,
+    get_results_dir_path,
     get_dynamic_split_mode,
     reload_env,
 )
@@ -202,7 +202,7 @@ def _text_to_csv(text: str) -> str:
 
 
 def _append_history_simple(text: str, start_time: str, end_time: str, cmd: str, filename: str, state_json: str = None):
-    history_path = Path(RESULTS_DIR) / "history.txt"
+    history_path = get_results_dir_path() / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     header = (
@@ -544,7 +544,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
 
     split_mode = get_dynamic_split_mode()
     workers = request.workers or get_dynamic_workers()
-    results_dir = Path(RESULTS_DIR)
+    results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
     all_files = []
@@ -697,7 +697,7 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
                                     start_time: str, end_time: str, target_ips: list[str], exclude_ips: set[str], ports):
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
     workers = min(request.workers or get_dynamic_workers(), max(1, len(target_ips)))
-    results_dir = Path(RESULTS_DIR)
+    results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
     direction_text = {direction: [] for direction in directions}
@@ -809,7 +809,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
         )
 
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
-    results_dir = Path(RESULTS_DIR)
+    results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
     direction_text = {direction: [] for direction in directions}
     per_ip_results = {}

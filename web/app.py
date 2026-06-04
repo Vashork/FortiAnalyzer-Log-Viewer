@@ -32,6 +32,7 @@ from config import (
     get_dynamic_max_matched_logs,
     get_dynamic_split_mode,
     get_dynamic_reverse_dns_enabled,
+    get_results_dir_path,
     reload_env,
     ensure_directories,
     validate_config,
@@ -142,7 +143,7 @@ class SettingsUpdate(BaseModel):
 
 
 def parse_history() -> List[dict]:
-    history_path = Path(RESULTS_DIR) / "history.txt"
+    history_path = get_results_dir_path() / "history.txt"
     if not history_path.exists():
         return []
 
@@ -172,6 +173,10 @@ def parse_history() -> List[dict]:
             "summary_lines": [],
             "state": None,  # Полное состояние запроса
         }
+
+        first_line = lines[0].strip()
+        if first_line.endswith("==="):
+            entry["timestamp"] = first_line[:-3].strip()
 
         for line in lines:
             if line.startswith("=== "):
@@ -432,10 +437,7 @@ def _resolve_result_path(file_path: str) -> Path:
 
 
 def _results_dir_path() -> Path:
-    results_dir = Path(RESULTS_DIR)
-    if not results_dir.is_absolute():
-        results_dir = PROJECT_ROOT / results_dir
-    return results_dir.resolve()
+    return get_results_dir_path()
 
 
 def _open_in_explorer(path: Path, select: bool = False):

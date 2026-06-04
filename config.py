@@ -31,6 +31,14 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", 100))
 # Output directory
 RESULTS_DIR = os.getenv("RESULTS_DIR", "results")
 
+
+def get_results_dir_path() -> Path:
+    """Return RESULTS_DIR resolved relative to the project root."""
+    results_dir = Path(os.getenv("RESULTS_DIR", RESULTS_DIR))
+    if not results_dir.is_absolute():
+        results_dir = PROJECT_ROOT / results_dir
+    return results_dir.resolve()
+
 # Performance tuning
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 1))
 
@@ -130,7 +138,7 @@ def get_dynamic_reverse_dns_enabled() -> bool:
 
 def ensure_directories():
     """Создать необходимые директории если их нет."""
-    Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+    get_results_dir_path().mkdir(parents=True, exist_ok=True)
     Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
     Path(RESOURCES_DIR).mkdir(parents=True, exist_ok=True)
 
