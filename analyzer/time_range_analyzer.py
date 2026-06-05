@@ -22,6 +22,7 @@ from analyzer.log_analyzer import (
     build_faz_filter,
     build_policy_faz_filter,
     _filter_logs_by_smart_action,
+    _iter_fetch_log_batches,
     split_time_range_safe,
 )
 from config import (
@@ -185,6 +186,17 @@ def _run_worker_segments(
     return all_logs_by_worker
 
 
+def _merge_policy_stats(target, source) -> None:
+    for key, source_entry in source.items():
+        target_entry = target[key]
+        target_entry["count"] += source_entry.get("count", 0)
+        for field, value in source_entry.items():
+            if field == "count":
+                continue
+            if isinstance(value, set):
+                target_entry.setdefault(field, set()).update(value)
+
+
 def analyze_logs_time_split(
     main_client: FortiAnalyzerClient,
     target_ips: List[str],
@@ -279,7 +291,7 @@ def analyze_policyid_logs_time_split(
 
     workers_segments = distribute_segments(segments, num_workers)
 
-    def worker_task(worker_id: int, segs: List[Tuple[str, str]]) -> Tuple[int, List[dict]]:
+    def worker_task(worker_id: int, segs: List[Tuple[str, str]]):
         label = f"W{worker_id}"
         total_time_ranges = " | ".join([f"{s[0]} → {s[1]}" for s in segs])
         if progress:
@@ -293,22 +305,50 @@ def analyze_policyid_logs_time_split(
         if not w_client.login():
             if progress:
                 progress(f"  ❌ {label}: FAZ login failed")
-            return worker_id, []
+            return worker_id, None, 0
 
         try:
-            logs = fetch_logs_for_segments(
-                w_client, filter_str, segs, batch_size,
-                target_ips=target_ips,
-                progress=progress, worker_label=label,
-                cancel_check=cancel_check,
-            )
+            analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
+            stats = None
+            total_logs = 0
+
+            for seg_idx, (seg_start, seg_end) in enumerate(segs, 1):
+                if cancel_check and cancel_check():
+                    if progress:
+                        progress(f"  ⏹ Cancelled", ip=label)
+                    return worker_id, stats, total_logs
+
+                if progress:
+                    progress(f"[{seg_idx}/{len(segs)}] ⏱ {seg_start} → {seg_end}", ip=label)
+
+                tid = w_client.create_search_task(filter_str, seg_start, seg_end)
+                if not tid:
+                    continue
+
+                ok, matched = w_client.wait_for_task_completion(tid)
+                if not ok or matched == 0:
+                    continue
+
+                if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
+                    matched = MAX_MATCHED_LOGS_PER_TASK
+
+                for logs_batch in _iter_fetch_log_batches(w_client, tid, matched, batch_size):
+                    if FILTER_MODE == "local":
+                        logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+                    if not logs_batch:
+                        continue
+                    total_logs += len(logs_batch)
+                    stats = analyzer.aggregate_by_policyid(logs_batch, target_ips, result=stats)
+
             if progress:
-                progress(f"  ✅ {label}[policy]: complete ({len(logs)} logs total)")
-            return worker_id, logs
+                progress(f"  ✅ {label}[policy]: complete ({total_logs} logs total)")
+            return worker_id, stats, total_logs
         finally:
             w_client.logout()
 
-    all_logs_by_worker: Dict[int, List[dict]] = {}
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
+    merged_stats = analyzer._new_policyid_stats()
+    total_logs = 0
     futures_map = {}
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         for i, segs in enumerate(workers_segments):
@@ -319,22 +359,15 @@ def analyze_policyid_logs_time_split(
     for future in as_completed(futures_map):
         worker_id = futures_map[future]
         try:
-            wid, logs = future.result()
-            all_logs_by_worker[wid] = logs
+            _, stats, worker_logs = future.result()
+            if stats:
+                _merge_policy_stats(merged_stats, stats)
+            total_logs += worker_logs
         except Exception as e:
             if progress:
                 progress(f"❌ Worker {worker_id} error: {e}")
 
-    all_logs = []
-    for wid in sorted(all_logs_by_worker.keys()):
-        all_logs.extend(all_logs_by_worker[wid])
-
-    if not all_logs:
+    if not total_logs:
         return ""
 
-    if FILTER_MODE == "local":
-        all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
-
-    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
-    stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
-    return analyzer.build_policyid_report(stats, policyid)
+    return analyzer.build_policyid_report(merged_stats, policyid)

@@ -1,5 +1,5 @@
 import time
-from typing import Optional, List, Dict, Tuple
+from typing import Iterator, Optional, List, Dict, Tuple
 
 import requests
 import urllib3
@@ -227,11 +227,9 @@ class FortiAnalyzerClient:
     #  Fetch Logs
     # ==========================
 
-    def fetch_logs(self, task_id: int, total_logs: int, batch_size: int = 100) -> List[Dict]:
-        all_logs: List[Dict] = []
+    def iter_fetch_logs(self, task_id: int, total_logs: int, batch_size: int = 100) -> Iterator[List[Dict]]:
         offset = 0
 
-        
         MAX_INCOMPLETE_RETRIES = 3
 
         print(f"📥 Fetching logs (matched={total_logs}, batch={batch_size})...")
@@ -262,7 +260,7 @@ class FortiAnalyzerClient:
                         self.cancel_search_task(task_id)  # отменяем task на сервере
                         if task_id in self._active_tasks:
                             self._active_tasks.remove(task_id)
-                        return all_logs
+                        return
 
                     try:
                         result = self._post(payload)
@@ -275,7 +273,7 @@ class FortiAnalyzerClient:
                             time.sleep(3)
                             continue
                         print(f"✗ Max retries reached at offset {offset}")
-                        return all_logs
+                        return
 
                     if not data:
                         empty_retry += 1
@@ -284,7 +282,7 @@ class FortiAnalyzerClient:
                             time.sleep(3)
                             continue
                         print(f"⚠️ No data at offset {offset} after {EMPTY_BATCH_LIMIT} retries.")
-                        return all_logs
+                        return
 
                     if len(data) < batch_size and (total_logs - offset) > len(data):
                         incomplete_retry += 1
@@ -294,17 +292,21 @@ class FortiAnalyzerClient:
                             continue
                         print(f"⚠️ Incomplete batch persists, accepting partial {len(data)}")
 
-                    all_logs.extend(data)
                     offset += len(data)
-                    print(f"📥 Fetched {len(all_logs)}/{total_logs} logs")
+                    print(f"📥 Fetched {offset}/{total_logs} logs")
+                    yield data
                     break
 
         except KeyboardInterrupt:
             print(f"\n⛔ Interrupted during fetch at offset {offset}. "
-                  f"Using {len(all_logs)} already fetched logs.")
-            return all_logs
+                  f"Using {offset} already fetched logs.")
+            return
 
-        if len(all_logs) != total_logs:
-            print(f"⚠️ Warning: Expected {total_logs} logs but got {len(all_logs)}")
+        if offset != total_logs:
+            print(f"⚠️ Warning: Expected {total_logs} logs but got {offset}")
 
+    def fetch_logs(self, task_id: int, total_logs: int, batch_size: int = 100) -> List[Dict]:
+        all_logs: List[Dict] = []
+        for batch in self.iter_fetch_logs(task_id, total_logs, batch_size):
+            all_logs.extend(batch)
         return all_logs

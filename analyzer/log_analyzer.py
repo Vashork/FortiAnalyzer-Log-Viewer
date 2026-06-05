@@ -114,23 +114,9 @@ class LogAnalyzer:
             if _config_bool(self.aggregation, field)
         )
 
-    # ----------------------------------------------------------
-    # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
-    # ----------------------------------------------------------
-    def aggregate_by_local(self, logs, direction: str, target_ips: List[str]):
-        if direction == "inbound":
-            local_field = "dstip"
-            remote_field = "srcip"
-            port_field = "dstport"
-        else:
-            local_field = "srcip"
-            remote_field = "dstip"
-            port_field = "dstport"
-
-        group_fields = self._local_aggregation_fields()
-        target_set = set(target_ips)
-
-        result: Dict[str, Dict[Tuple[str, ...], Dict]] = defaultdict(
+    @staticmethod
+    def _new_local_stats():
+        return defaultdict(
             lambda: defaultdict(
                 lambda: {
                     "count": 0,
@@ -147,6 +133,42 @@ class LogAnalyzer:
                 }
             )
         )
+
+    @staticmethod
+    def _new_policyid_stats():
+        return defaultdict(
+            lambda: {
+                "count": 0,
+                "actions": set(),
+                "policyids": set(),
+                "apps": set(),
+                "srcports": set(),
+                "srcintfs": set(),
+                "dstintfs": set(),
+                "policynames": set(),
+                "devnames": set(),
+                "smart_actions": set(),
+            }
+        )
+
+    # ----------------------------------------------------------
+    # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
+    # ----------------------------------------------------------
+    def aggregate_by_local(self, logs, direction: str, target_ips: List[str], result=None):
+        if direction == "inbound":
+            local_field = "dstip"
+            remote_field = "srcip"
+            port_field = "dstport"
+        else:
+            local_field = "srcip"
+            remote_field = "dstip"
+            port_field = "dstport"
+
+        group_fields = self._local_aggregation_fields()
+        target_set = set(target_ips)
+
+        if result is None:
+            result = self._new_local_stats()
 
         for log in logs:
             local_ip = log.get(local_field)
@@ -295,23 +317,11 @@ class LogAnalyzer:
     # ----------------------------------------------------------
     # POLICYID MODE — GLOBAL AGGREGATION
     # ----------------------------------------------------------
-    def aggregate_by_policyid(self, logs, target_ips: List[str]):
+    def aggregate_by_policyid(self, logs, target_ips: List[str], result=None):
         group_fields = self._policyid_aggregation_fields()
 
-        result: Dict[Tuple[str, ...], Dict] = defaultdict(
-            lambda: {
-                "count": 0,
-                "actions": set(),
-                "policyids": set(),
-                "apps": set(),
-                "srcports": set(),
-                "srcintfs": set(),
-                "dstintfs": set(),
-                "policynames": set(),
-                "devnames": set(),
-                "smart_actions": set(),
-            }
-        )
+        if result is None:
+            result = self._new_policyid_stats()
 
         target_set = set(target_ips) if target_ips else None
 
@@ -452,6 +462,17 @@ def _filter_logs_by_smart_action(logs, smart_action: str):
     return logs
 
 
+def _iter_fetch_log_batches(client, task_id: int, total_logs: int, batch_size: int):
+    iter_fetch = getattr(client, "iter_fetch_logs", None)
+    if iter_fetch is not None:
+        yield from iter_fetch(task_id, total_logs, batch_size)
+        return
+
+    logs = client.fetch_logs(task_id, total_logs, batch_size)
+    if logs:
+        yield logs
+
+
 # ----------------------------------------------------------
 # FAZ FILTERS
 # ----------------------------------------------------------
@@ -530,7 +551,9 @@ def analyze_logs(
         progress(f"📡 {direction}: {len(target_ips)} IPs, {start_time} → {end_time}")
 
     time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
-    all_logs = []
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
+    stats = None
+    total_logs = 0
 
     for seg_start, seg_end in time_ranges:
         if progress:
@@ -547,27 +570,26 @@ def analyze_logs(
         if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
             matched = MAX_MATCHED_LOGS_PER_TASK
 
-        logs_segment = client.fetch_logs(tid, matched, batch_size)
-        if logs_segment:
-            all_logs.extend(logs_segment)
+        for logs_batch in _iter_fetch_log_batches(client, tid, matched, batch_size):
+            if FILTER_MODE == "local":
+                logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+            if not logs_batch:
+                continue
+            total_logs += len(logs_batch)
+            stats = analyzer.aggregate_by_local(logs_batch, direction, target_ips, result=stats)
 
     if progress:
-        if all_logs:
-            progress(f"✅ {direction}: {len(all_logs)} logs found")
+        if total_logs:
+            progress(f"✅ {direction}: {total_logs} logs found")
         else:
             progress(f"⚠ {direction}: no logs in FAZ for this direction")
 
-    if not all_logs:
+    if not total_logs or not stats:
         return {}
 
     if progress:
-        progress(f"🧮 {direction}: aggregating {len(all_logs)} logs", ip=target_ips[0] if len(target_ips) == 1 else None)
+        progress(f"🧮 {direction}: aggregated {total_logs} logs", ip=target_ips[0] if len(target_ips) == 1 else None)
 
-    if FILTER_MODE == "local":
-        all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
-
-    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
-    stats = analyzer.aggregate_by_local(all_logs, direction, target_ips)
     if progress:
         progress(f"📝 {direction}: building report", ip=target_ips[0] if len(target_ips) == 1 else None)
     return analyzer.build_reports_per_local(stats, direction, target_ips)
@@ -596,7 +618,9 @@ def analyze_policyid_logs(
     print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
 
     time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
-    all_logs = []
+    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
+    stats = None
+    total_logs = 0
 
     for seg_start, seg_end in time_ranges:
         print(f"⏱ Segment: {seg_start} → {seg_end}")
@@ -612,21 +636,20 @@ def analyze_policyid_logs(
         if MAX_MATCHED_LOGS_PER_TASK > 0 and matched > MAX_MATCHED_LOGS_PER_TASK:
             matched = MAX_MATCHED_LOGS_PER_TASK
 
-        logs_segment = client.fetch_logs(tid, matched, batch_size)
-        if logs_segment:
-            all_logs.extend(logs_segment)
+        for logs_batch in _iter_fetch_log_batches(client, tid, matched, batch_size):
+            if FILTER_MODE == "local":
+                logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+            if not logs_batch:
+                continue
+            total_logs += len(logs_batch)
+            stats = analyzer.aggregate_by_policyid(logs_batch, target_ips, result=stats)
 
-    if not all_logs:
+    if not total_logs or not stats:
         return ""
 
     if progress:
-        progress(f"🧮 policyid={policyid}: aggregating {len(all_logs)} logs")
+        progress(f"🧮 policyid={policyid}: aggregated {total_logs} logs")
 
-    if FILTER_MODE == "local":
-        all_logs = _filter_logs_by_smart_action(all_logs, SMART_ACTION)
-
-    analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
-    stats = analyzer.aggregate_by_policyid(all_logs, target_ips)
     if progress:
         progress(f"📝 policyid={policyid}: building report")
     return analyzer.build_policyid_report(stats, policyid)

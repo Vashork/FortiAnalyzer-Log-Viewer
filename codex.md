@@ -1,5 +1,33 @@
 # Codex Notes
 
+## Memory Roadmap
+
+Context: long Web UI exports can exhaust RAM because raw FAZ logs and generated report text are accumulated in memory before being written or returned to the browser. Stopping the export may not immediately return memory to the OS because the Python process allocator can keep freed arenas reserved until process restart.
+
+1. [done] Stream raw FAZ logs into aggregation.
+   - Add a batch iterator to `FortiAnalyzerClient`.
+   - Keep `fetch_logs()` compatible for existing callers.
+   - Update `direction` and `policyid` analysis to aggregate each fetched batch immediately instead of building one huge `all_logs` list.
+
+2. [todo] Stop returning full report bodies in the SSE `done` event.
+   - Return saved file metadata only.
+   - Let the browser load result content from `/api/results/{path}` when needed.
+   - Avoid duplicating TXT/CSV report content in memory after files are already saved.
+
+3. [todo] Make per-IP result caching memory-safe.
+   - Remove `per_ip_results` from large runs or make it optional/summary-only.
+   - Preserve UI/history behavior without keeping another full copy of every per-IP report.
+
+4. [todo] Stream final direction/policy report writes.
+   - Avoid collecting all report strings in `direction_text`/`policy_texts` before writing.
+   - Append or spool partial report sections to result files as workers complete.
+   - Keep history metadata complete without storing huge report bodies twice.
+
+5. [todo] Add memory-focused regression tests.
+   - Verify analysis consumes batches incrementally.
+   - Verify SSE completion payload contains file metadata, not full report content.
+   - Cover cancellation behavior while streaming batches.
+
 ## Контекст проекта
 
 Проект: `FortiAnalyzer Log Viewer` / `falv2`.

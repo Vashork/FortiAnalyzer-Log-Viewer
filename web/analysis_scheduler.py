@@ -364,17 +364,16 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
         _drop_active_task(task_id)
         return False, 0
 
-    def patched_fetch(task_id, total, batch=100):
-        all_logs = []
+    def patched_iter_fetch(task_id, total, batch=100):
         offset = 0
         incomplete_retry_limit = 3
 
         while offset < total:
             if cancel_check and cancel_check():
-                emitter.message(f"Cancelled (fetched {len(all_logs)}/{total})", worker=worker, stage="cancel")
+                emitter.message(f"Cancelled (fetched {offset}/{total})", worker=worker, stage="cancel")
                 client.cancel_search_task(task_id)
                 _drop_active_task(task_id)
-                return all_logs
+                return
 
             payload = {
                 "id": "123456789",
@@ -388,10 +387,10 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
             incomplete_retry = 0
             while True:
                 if cancel_check and cancel_check():
-                    emitter.message(f"Cancelled (fetched {len(all_logs)}/{total})", worker=worker, stage="cancel")
+                    emitter.message(f"Cancelled (fetched {offset}/{total})", worker=worker, stage="cancel")
                     client.cancel_search_task(task_id)
                     _drop_active_task(task_id)
-                    return all_logs
+                    return
 
                 try:
                     resp = client._post(payload)
@@ -408,7 +407,7 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
                         continue
                     emitter.message(f"Fetch aborted at offset {offset}: {exc}", worker=worker, stage="error")
                     _drop_active_task(task_id)
-                    return all_logs
+                    return
 
                 if not data:
                     empty_retry += 1
@@ -422,7 +421,7 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
                         continue
                     emitter.message(f"No data at offset {offset} after retries", worker=worker, stage="warn")
                     _drop_active_task(task_id)
-                    return all_logs
+                    return
 
                 if len(data) < batch and (total - offset) > len(data):
                     incomplete_retry += 1
@@ -435,17 +434,23 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
                         time.sleep(3)
                         continue
 
-                all_logs.extend(data)
                 offset += len(data)
                 pct = int(offset / total * 100) if total else 100
-                emitter.fetch_progress(worker, len(all_logs), total, pct)
+                emitter.fetch_progress(worker, offset, total, pct)
+                yield data
                 break
 
         _drop_active_task(task_id)
+
+    def patched_fetch(task_id, total, batch=100):
+        all_logs = []
+        for logs_batch in patched_iter_fetch(task_id, total, batch):
+            all_logs.extend(logs_batch)
         return all_logs
 
     client.create_search_task = patched_create
     client.wait_for_task_completion = patched_wait
+    client.iter_fetch_logs = patched_iter_fetch
     client.fetch_logs = patched_fetch
 
 
