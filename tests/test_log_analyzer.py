@@ -84,6 +84,25 @@ class LogAnalyzerAggregationTests(unittest.TestCase):
         self.assertEqual(stats[("10.0.0.10", "10.0.0.20", "22", "tcp", "100")]["count"], 1)
         self.assertEqual(stats[("10.0.0.10", "10.0.0.30", "22", "tcp", "100")]["count"], 1)
 
+    def test_policyid_report_resolves_source_and_destination_hostnames(self):
+        analyzer = LogAnalyzer([], columns={"connections": True})
+        logs = [
+            {"srcip": "10.0.0.10", "dstip": "10.0.0.20", "dstport": 22, "proto": 6, "policyid": 100},
+        ]
+
+        stats = analyzer.aggregate_by_policyid(logs, [])
+        with patch(
+            "analyzer.log_analyzer.resolve_hostname",
+            side_effect=lambda ip: {"10.0.0.10": "src.example", "10.0.0.20": "dst.example"}[ip],
+        ):
+            report = analyzer.build_policyid_report(stats, 100)
+
+        header = next(line for line in report.splitlines() if line.startswith("Srcip"))
+        self.assertIn("SrcHostname", header)
+        self.assertIn("DstHostname", header)
+        self.assertIn("src.example", report)
+        self.assertIn("dst.example", report)
+
     def test_policyid_aggregation_can_ignore_dstip(self):
         analyzer = LogAnalyzer(
             [],

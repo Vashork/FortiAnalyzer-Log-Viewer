@@ -22,6 +22,10 @@ POLICYID_COLUMN_SPECS = {
     "proto": ("Proto", 5),
     "policyid": ("PolicyID", 8),
 }
+POLICYID_HOSTNAME_COLUMNS = {
+    "srcip": ("SrcHostname", 30),
+    "dstip": ("DstHostname", 30),
+}
 
 
 def _config_bool(config: dict, key: str, default: bool = True) -> bool:
@@ -406,7 +410,11 @@ class LogAnalyzer:
             "",
             ]
 
-        columns = [POLICYID_COLUMN_SPECS[field] for field in group_fields]
+        columns = []
+        for field in group_fields:
+            columns.append(POLICYID_COLUMN_SPECS[field])
+            if field in POLICYID_HOSTNAME_COLUMNS:
+                columns.append(POLICYID_HOSTNAME_COLUMNS[field])
         if show_connections:
             columns.append(("Count", 8))
         for col, _ in extra_cols:
@@ -423,10 +431,12 @@ class LogAnalyzer:
         ):
             group_values = dict(zip(group_fields, key))
             total_conns += d["count"]
-            row_parts = [
-                (group_values[field], POLICYID_COLUMN_SPECS[field][1])
-                for field in group_fields
-            ]
+            row_parts = []
+            for field in group_fields:
+                value = group_values[field]
+                row_parts.append((value, POLICYID_COLUMN_SPECS[field][1]))
+                if field in POLICYID_HOSTNAME_COLUMNS:
+                    row_parts.append((resolve_hostname(value), POLICYID_HOSTNAME_COLUMNS[field][1]))
             if show_connections:
                 row_parts.append((str(d["count"]), 8))
 
