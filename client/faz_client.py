@@ -1,18 +1,52 @@
+import os
 import time
-from typing import Iterator, Optional, List, Dict, Tuple
+from typing import Iterator, Optional, List, Dict, Tuple, Union
 
 import requests
 import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from requests.adapters import HTTPAdapter
 
 from config import EMPTY_BATCH_LIMIT
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
 
 
 class FortiAnalyzerClient:
     """Simple JSON-RPC client for FortiAnalyzer logsearch API."""
 
-    def __init__(self, url: str, username: str, password: str, cancel_check=None):
+    def __init__(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        cancel_check=None,
+        *,
+        verify_tls: bool = False,
+        ca_bundle: Optional[str] = None,
+        pool_connections: int = 10,
+        pool_maxsize: int = 10,
+        connect_timeout: int = 5,
+        read_timeout: int = 30,
+    ):
         self.url = url
         self.username = username
         self.password = password
@@ -20,13 +54,56 @@ class FortiAnalyzerClient:
         self._login_session_id = "1"
         self.cancel_check = cancel_check  # callable() -> bool
         self._active_tasks: List[int] = []  # отслеживаем созданные search tasks
+        self.verify_tls = verify_tls
+        self.ca_bundle = ca_bundle.strip() if ca_bundle else None
+        self.verify: Union[bool, str] = self.ca_bundle if verify_tls and self.ca_bundle else verify_tls
+        self.pool_connections = pool_connections
+        self.pool_maxsize = pool_maxsize
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+        self.http = requests.Session()
+        adapter = HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize)
+        self.http.mount("https://", adapter)
+        self.http.mount("http://", adapter)
+        if self.verify is False:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            print("⚠ FortiAnalyzer TLS verification is disabled (FORTIANALYZER_TLS_VERIFY=false)")
+
+    @classmethod
+    def from_env(cls, cancel_check=None) -> "FortiAnalyzerClient":
+        """Create a client from environment variables with safe compatibility defaults."""
+        verify_tls = _env_bool("FORTIANALYZER_TLS_VERIFY", False)
+        return cls(
+            url=_required_env("FORTIANALYZER_URL"),
+            username=_required_env("FORTIANALYZER_USERNAME"),
+            password=_required_env("FORTIANALYZER_PASSWORD"),
+            cancel_check=cancel_check,
+            verify_tls=verify_tls,
+            ca_bundle=os.getenv("FORTIANALYZER_CA_BUNDLE") or None,
+            pool_connections=_env_int("FORTIANALYZER_POOL_CONNECTIONS", 10),
+            pool_maxsize=_env_int("FORTIANALYZER_POOL_MAXSIZE", 10),
+            connect_timeout=_env_int("FORTIANALYZER_CONNECT_TIMEOUT", 5),
+            read_timeout=_env_int("FORTIANALYZER_READ_TIMEOUT", 30),
+        )
+
+    def transport_kwargs(self) -> Dict:
+        """Return transport settings for worker clients spawned from this client."""
+        return {
+            "verify_tls": self.verify_tls,
+            "ca_bundle": self.ca_bundle,
+            "pool_connections": self.pool_connections,
+            "pool_maxsize": self.pool_maxsize,
+            "connect_timeout": self.connect_timeout,
+            "read_timeout": self.read_timeout,
+        }
 
     # ==========================
     #  Low-level wrapper
     # ==========================
 
-    def _post(self, payload: Dict, timeout: int = 30) -> Dict:
-        response = requests.post(self.url, json=payload, timeout=timeout, verify=False)
+    def _post(self, payload: Dict, timeout: Optional[Union[int, Tuple[int, int]]] = None) -> Dict:
+        request_timeout = timeout if timeout is not None else (self.connect_timeout, self.read_timeout)
+        response = self.http.post(self.url, json=payload, timeout=request_timeout, verify=self.verify)
         response.raise_for_status()
         return response.json()
 
@@ -65,12 +142,17 @@ class FortiAnalyzerClient:
         except Exception:
             return False
 
+    def close(self) -> None:
+        """Close the underlying reusable HTTP session."""
+        self.http.close()
+
     def logout(self) -> bool:
         # Перед logout отменяем все активные search tasks
         if self._active_tasks:
             self.cancel_all_tasks()
 
         if not self.session:
+            self.close()
             return True
 
         payload = {
@@ -86,6 +168,8 @@ class FortiAnalyzerClient:
         except Exception as e:
             print(f"✗ Logout error: {e}")
             return False
+        finally:
+            self.close()
 
     # ==========================
     #  Log Search

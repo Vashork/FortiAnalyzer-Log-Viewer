@@ -147,6 +147,7 @@ def _run_worker_segments(
         w_client = FortiAnalyzerClient(
             url=main_client.url, username=main_client.username, password=main_client.password,
             cancel_check=cancel_check,
+            **main_client.transport_kwargs(),
         )
         if not w_client.login():
             if progress:
@@ -301,6 +302,7 @@ def analyze_policyid_logs_time_split(
         w_client = FortiAnalyzerClient(
             url=main_client.url, username=main_client.username, password=main_client.password,
             cancel_check=cancel_check,
+            **main_client.transport_kwargs(),
         )
         if not w_client.login():
             if progress:

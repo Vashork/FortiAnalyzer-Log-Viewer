@@ -95,29 +95,59 @@
 
 ### 2.1 requests.Session and connection pooling
 
-Проблема: каждый JSON-RPC request сейчас идет через `requests.post`, без connection reuse.
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- `FortiAnalyzerClient` использует один reusable `requests.Session` на экземпляр клиента;
+- `HTTPAdapter(pool_connections, pool_maxsize)` монтируется для `https://` и `http://`;
+- timeout по умолчанию стал tuple `(connect_timeout, read_timeout)`;
+- session закрывается через `logout()` / `close()`;
+- CLI/Web creation paths используют `FortiAnalyzerClient.from_env()`;
+- worker-клиенты time-split наследуют transport settings от main client.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_faz_client.py -q` → 6 passed;
+- `PYTHONPATH=. pytest -q` → 15 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
+Проблема: каждый JSON-RPC request раньше шел через `requests.post`, без connection reuse.
 
 Что сделать:
-- добавить `requests.Session` в `FortiAnalyzerClient`;
-- настроить `HTTPAdapter(pool_connections, pool_maxsize)`;
-- использовать timeout tuple `(connect_timeout, read_timeout)`;
-- закрывать session при logout/close.
+- [x] добавить `requests.Session` в `FortiAnalyzerClient`;
+- [x] настроить `HTTPAdapter(pool_connections, pool_maxsize)`;
+- [x] использовать timeout tuple `(connect_timeout, read_timeout)`;
+- [x] закрывать session при logout/close.
 
 Критерии готовности:
-- существующие тесты проходят;
-- добавить unit-test/mocked test на использование session;
-- поведение API не меняется.
+- [x] существующие тесты проходят;
+- [x] добавить unit-test/mocked test на использование session;
+- [x] поведение API не меняется.
 
 ### 2.2 Optional TLS verification support
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- добавлены env-настройки в `.env.example`:
+  - `FORTIANALYZER_TLS_VERIFY=false`;
+  - `FORTIANALYZER_CA_BUNDLE=`;
+  - `FORTIANALYZER_POOL_CONNECTIONS=10`;
+  - `FORTIANALYZER_POOL_MAXSIZE=10`;
+  - `FORTIANALYZER_CONNECT_TIMEOUT=5`;
+  - `FORTIANALYZER_READ_TIMEOUT=30`;
+- default остается совместимым: TLS verify выключен, чтобы не сломать FAZ с self-signed сертификатом;
+- если `FORTIANALYZER_TLS_VERIFY=true` и задан `FORTIANALYZER_CA_BUNDLE`, requests получает `verify=/path/to/ca.pem`;
+- если `FORTIANALYZER_TLS_VERIFY=true` без CA bundle, requests получает `verify=True`;
+- если verify выключен, клиент печатает предупреждение и отключает `InsecureRequestWarning`.
+
 Что сделать:
-- добавить env:
+- [x] добавить env:
   - `FORTIANALYZER_TLS_VERIFY=false` default;
   - `FORTIANALYZER_CA_BUNDLE=` optional;
-- передавать `verify=False|True|path` в requests;
-- если `verify=False`, логировать предупреждение, но не ломать запуск.
+- [x] передавать `verify=False|True|path` в requests;
+- [x] если `verify=False`, логировать предупреждение, но не ломать запуск.
 
-Важно: не включать verify по умолчанию до готовности сертификата на FAZ.
+Важно: verify по умолчанию не включен до готовности сертификата на FAZ.
 
 ### 2.3 Better retry/backoff
 

@@ -22,11 +22,7 @@ from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
 
 def _create_faz_client() -> FortiAnalyzerClient:
     """Создать клиент FAZ из переменных окружения."""
-    return FortiAnalyzerClient(
-        url=os.getenv("FORTIANALYZER_URL"),
-        username=os.getenv("FORTIANALYZER_USERNAME"),
-        password=os.getenv("FORTIANALYZER_PASSWORD"),
-    )
+    return FortiAnalyzerClient.from_env()
 
 
 from utils.output import save_results

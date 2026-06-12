@@ -457,12 +457,7 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
 def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: CancelCheck, *,
                     target_ips, exclude_ips, start_time, end_time, batch_size, ports,
                     direction=None, policyid=None, columns=None, aggregation=None):
-    client = FortiAnalyzerClient(
-        url=os.getenv("FORTIANALYZER_URL"),
-        username=os.getenv("FORTIANALYZER_USERNAME"),
-        password=os.getenv("FORTIANALYZER_PASSWORD"),
-        cancel_check=cancel_check,
-    )
+    client = FortiAnalyzerClient.from_env(cancel_check=cancel_check)
     if not client.login():
         return None
 
@@ -566,11 +561,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                 worker = WorkerRef(worker_id=f"W{w_id}", label=f"W{w_id}", slot_key=f"W{w_id}", direction="policy")
                 emitter.worker_started(worker, message=f"Time-split worker for policyid={policy_id}")
 
-            main_client = FortiAnalyzerClient(
-                url=os.getenv("FORTIANALYZER_URL"),
-                username=os.getenv("FORTIANALYZER_USERNAME"),
-                password=os.getenv("FORTIANALYZER_PASSWORD"),
-            )
+            main_client = FortiAnalyzerClient.from_env()
             text = analyze_policyid_logs_time_split(
                 main_client=main_client,
                 target_ips=target_ips,
