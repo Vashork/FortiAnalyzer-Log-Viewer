@@ -66,8 +66,50 @@ class WorkerRef:
 
 
 class SchedulerEmitter:
-    def __init__(self, emit: EventCallback):
+    def __init__(self, emit: EventCallback, monotonic: Callable[[], float] = time.monotonic):
         self._emit = emit
+        self._monotonic = monotonic
+        self._last_fetch_progress: dict[str, tuple[int, float]] = {}
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, str(default)))
+        except ValueError:
+            return default
+
+    def _should_emit_fetch_progress(self, worker: WorkerRef, pct: int) -> bool:
+        step = max(0, self._env_int("PROGRESS_MIN_PERCENT_STEP", 5))
+        interval = max(0.0, self._env_float("PROGRESS_MIN_INTERVAL_SECONDS", 1.0))
+        key = worker.slot_key or worker.worker_id
+        now = self._monotonic()
+        last = self._last_fetch_progress.get(key)
+        if last is None:
+            self._last_fetch_progress[key] = (pct, now)
+            return True
+
+        last_pct, last_ts = last
+        if pct < last_pct:
+            self._last_fetch_progress[key] = (pct, now)
+            return True
+
+        pct_delta = pct - last_pct
+        time_delta = now - last_ts
+        should_emit = (
+            pct >= 100
+            or (step == 0 or pct_delta >= step)
+            or (interval > 0 and time_delta >= interval)
+        )
+        if should_emit:
+            self._last_fetch_progress[key] = (pct, now)
+        return should_emit
 
     def event(self, event_type: str, **payload):
         self._emit({"type": event_type, **payload})
@@ -105,6 +147,8 @@ class SchedulerEmitter:
         self.event("segment_started", **payload)
 
     def fetch_progress(self, worker: WorkerRef, fetched: int, total: int, pct: int):
+        if not self._should_emit_fetch_progress(worker, pct):
+            return
         payload = worker.payload()
         payload.update({
             "fetched": fetched,

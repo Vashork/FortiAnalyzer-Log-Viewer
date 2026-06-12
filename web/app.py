@@ -425,26 +425,52 @@ def update_env_file(updates: dict):
 # ========================
 
 MAX_ACTIVE_ANALYSIS_JOBS = int(os.getenv("MAX_ACTIVE_ANALYSIS_JOBS", "2"))
+MAX_PROGRESS_QUEUE_SIZE = int(os.getenv("MAX_PROGRESS_QUEUE_SIZE", "1000"))
 _job_registry = JobRegistry(max_active=MAX_ACTIVE_ANALYSIS_JOBS)
 _progress_queues: dict[str, asyncio.Queue] = {}
 
 
+def _enqueue_progress_event(queue: asyncio.Queue, event: dict) -> None:
+    """Put progress event into a bounded queue, dropping stale events when full."""
+    try:
+        queue.put_nowait(event)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+
+    try:
+        queue.put_nowait(event)
+    except asyncio.QueueFull:
+        if event.get("type") in ("done", "error", "cancelled"):
+            # Make terminal events best-effort guaranteed even under a full queue.
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(event)
+
+
 async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     loop = asyncio.get_event_loop()
-    queue = asyncio.Queue()
+    queue = asyncio.Queue(maxsize=max(0, MAX_PROGRESS_QUEUE_SIZE))
     _progress_queues[request_id] = queue
 
     def emit(event: dict):
-        loop.call_soon_threadsafe(queue.put_nowait, event)
+        loop.call_soon_threadsafe(_enqueue_progress_event, queue, event)
 
     def done(result: dict):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
+        loop.call_soon_threadsafe(_enqueue_progress_event, queue, {"type": "done", "result": result})
 
     def cancelled(message: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "cancelled", "message": message})
+        loop.call_soon_threadsafe(_enqueue_progress_event, queue, {"type": "cancelled", "message": message})
 
     def error(msg: str):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg, "ip": None})
+        loop.call_soon_threadsafe(_enqueue_progress_event, queue, {"type": "error", "message": msg, "ip": None})
 
     def is_cancelled() -> bool:
         return _job_registry.is_cancelled(request_id)

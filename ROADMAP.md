@@ -364,10 +364,30 @@
 
 ### 3.5 Progress throttling
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- `SchedulerEmitter.fetch_progress()` теперь throttles события по двум условиям:
+  - `PROGRESS_MIN_PERCENT_STEP=5` — не чаще чем раз в N процентных пунктов;
+  - `PROGRESS_MIN_INTERVAL_SECONDS=1` — time fallback для долгих операций без большого percent delta;
+- первый progress event, финальный `100%` и первый event нового FAZ task после reset процента всегда отправляются;
+- non-progress events (`message`, `worker_finished`, terminal events) не throttled;
+- SSE queue стала bounded через `MAX_PROGRESS_QUEUE_SIZE=1000`;
+- при переполнении queue старейшие stale events coalesced/drop, а terminal events `done`/`error`/`cancelled` best-effort сохраняются;
+- `.env.example` документирует progress throttling и queue limit.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_progress_throttling.py -q` → 4 passed;
+- `PYTHONPATH=. pytest tests/test_progress_queue.py -q` → 2 passed;
+- `PYTHONPATH=. pytest tests/test_progress_throttling.py tests/test_progress_queue.py -q` → 6 passed;
+- `PYTHONPATH=. pytest tests/test_progress_throttling.py tests/test_progress_queue.py tests/test_web_guardrails.py tests/test_web_validation.py tests/test_job_registry.py -q` → 19 passed;
+- `PYTHONPATH=. pytest -q` → 54 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- не отправлять SSE/progress event на каждый мелкий batch, если событий слишком много;
-- throttle по времени или проценту;
-- queue maxsize/coalescing для progress events.
+- [x] не отправлять SSE/progress event на каждый мелкий batch, если событий слишком много;
+- [x] throttle по времени или проценту;
+- [x] queue maxsize/coalescing для progress events.
 
 ## Phase 4 — Results/history scalability
 
