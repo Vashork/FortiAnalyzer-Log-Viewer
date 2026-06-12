@@ -26,9 +26,10 @@ from config import (
     get_dynamic_workers,
     get_results_dir_path,
     get_dynamic_split_mode,
+    get_dynamic_reverse_dns_enabled,
     reload_env,
 )
-from utils.network import load_machines
+from utils.network import configure_reverse_dns, load_machines
 from utils.batching import group_target_ips
 from utils.output import save_results
 
@@ -930,6 +931,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
 
 def run_analysis_request(request, emit: EventCallback, cancel_check: CancelCheck):
     emitter = SchedulerEmitter(emit)
+    configure_reverse_dns(get_dynamic_reverse_dns_enabled())
     start_time, end_time, target_ips, exclude_ips, ports = _collect_request_context(request)
 
     emitter.job_started(

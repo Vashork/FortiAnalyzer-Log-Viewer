@@ -92,8 +92,8 @@ class LogAnalyzerAggregationTests(unittest.TestCase):
 
         stats = analyzer.aggregate_by_policyid(logs, [])
         with patch(
-            "analyzer.log_analyzer.resolve_hostname",
-            side_effect=lambda ip: {"10.0.0.10": "src.example", "10.0.0.20": "dst.example"}[ip],
+            "analyzer.log_analyzer.resolve_hostnames",
+            return_value={"10.0.0.10": "src.example", "10.0.0.20": "dst.example"},
         ):
             report = analyzer.build_policyid_report(stats, 100)
 

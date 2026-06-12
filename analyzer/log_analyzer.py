@@ -2,7 +2,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
-from utils.network import resolve_hostname
+from utils.network import resolve_hostnames
 from config import (
     COLUMNS_CONFIG,
     AGGREGATION_CONFIG,
@@ -282,6 +282,13 @@ class LogAnalyzer:
 
             total_conns = 0
             uniq_ips = set()
+            remote_hostnames = {}
+            if "remote_ip" in group_fields:
+                remote_values = [
+                    dict(zip(group_fields, key))["remote_ip"]
+                    for key in items.keys()
+                ]
+                remote_hostnames = resolve_hostnames(remote_values)
 
             for key, d in sorted(
                     items.items(), key=lambda x: (-x[1]["count"], x[0])
@@ -295,7 +302,7 @@ class LogAnalyzer:
                     remote = group_values["remote_ip"]
                     row_parts.extend([
                         (remote, 15),
-                        (resolve_hostname(remote), 30),
+                        (remote_hostnames.get(remote, remote), 30),
                     ])
                 if "port" in group_fields:
                     row_parts.append((group_values["port"], 7))
@@ -426,6 +433,14 @@ class LogAnalyzer:
         lines.append(sep)
 
         total_conns = 0
+        hostname_values = []
+        for key in stats.keys():
+            group_values = dict(zip(group_fields, key))
+            for field in group_fields:
+                if field in POLICYID_HOSTNAME_COLUMNS:
+                    hostname_values.append(group_values[field])
+        hostnames = resolve_hostnames(hostname_values)
+
         for key, d in sorted(
                 stats.items(), key=lambda x: (-x[1]["count"], x[0])
         ):
@@ -436,7 +451,7 @@ class LogAnalyzer:
                 value = group_values[field]
                 row_parts.append((value, POLICYID_COLUMN_SPECS[field][1]))
                 if field in POLICYID_HOSTNAME_COLUMNS:
-                    row_parts.append((resolve_hostname(value), POLICYID_HOSTNAME_COLUMNS[field][1]))
+                    row_parts.append((hostnames.get(value, value), POLICYID_HOSTNAME_COLUMNS[field][1]))
             if show_connections:
                 row_parts.append((str(d["count"]), 8))
 

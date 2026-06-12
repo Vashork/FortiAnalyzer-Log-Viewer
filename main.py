@@ -12,11 +12,12 @@ from config import (
     MAX_WORKERS,
     TARGET_GROUP_SIZE,
     DEFAULT_TIME_RANGE_HOURS,
+    get_dynamic_reverse_dns_enabled,
     validate_config,
     reload_env,
 )
 
-from utils.network import load_machines, load_ports
+from utils.network import configure_reverse_dns, load_machines, load_ports
 from utils.batching import group_target_ips
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
@@ -94,6 +95,7 @@ def main():
 
     args = parser.parse_args()
     validate_config()
+    configure_reverse_dns(get_dynamic_reverse_dns_enabled())
 
     cmd = " ".join(sys.argv)
 

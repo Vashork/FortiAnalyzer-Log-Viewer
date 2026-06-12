@@ -37,7 +37,7 @@ from config import (
     reload_env,
     validate_config,
 )
-from utils.network import clear_hostname_cache, load_machines
+from utils.network import clear_hostname_cache, configure_reverse_dns, load_machines
 from web.analysis_scheduler import AnalysisCancelled, run_analysis_request
 from web.job_registry import JobRegistry
 
@@ -732,6 +732,7 @@ async def update_settings(data: SettingsUpdate):
         update_env_file(updates)
         if clear_dns_cache:
             clear_hostname_cache()
+            configure_reverse_dns(not bool(data.disable_reverse_dns))
             logger.info("Reverse DNS cache cleared after settings update")
     return {"status": "ok", "updated": len(updates)}
 
