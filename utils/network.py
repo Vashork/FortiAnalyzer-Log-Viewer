@@ -20,6 +20,14 @@ _reverse_dns_cache_size = int(os.getenv("REVERSE_DNS_CACHE_SIZE", "10000"))
 _cache_lock = Lock()
 
 
+def _reverse_dns_max_unique_ips() -> int:
+    """Return auto-disable threshold for bulk PTR resolution; <=0 means unlimited."""
+    try:
+        return int(os.getenv("REVERSE_DNS_MAX_UNIQUE_IPS", "1000"))
+    except ValueError:
+        return 1000
+
+
 def clear_hostname_cache() -> None:
     """Clear cached reverse-DNS lookups."""
     with _cache_lock:
@@ -100,6 +108,10 @@ def resolve_hostnames(ips: Iterable[str], max_workers: Optional[int] = None) -> 
     """Resolve many IPs with bounded concurrency and shared cache."""
     unique_ips = list(dict.fromkeys(str(ip) for ip in ips if ip))
     if not _is_reverse_dns_enabled():
+        return {ip: ip for ip in unique_ips}
+
+    max_unique_ips = _reverse_dns_max_unique_ips()
+    if max_unique_ips > 0 and len(unique_ips) > max_unique_ips:
         return {ip: ip for ip in unique_ips}
 
     result: Dict[str, str] = {}

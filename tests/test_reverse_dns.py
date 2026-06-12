@@ -72,6 +72,38 @@ class ReverseDnsCacheTests(unittest.TestCase):
         self.assertEqual(second, first)
         self.assertEqual(gethostbyaddr.call_count, 2)
 
+    def test_resolve_hostnames_auto_disables_for_large_reports(self):
+        with (
+            patch.dict("os.environ", {"REVERSE_DNS_MAX_UNIQUE_IPS": "2"}),
+            patch.object(network.socket, "gethostbyaddr", side_effect=AssertionError("PTR lookup should be skipped")),
+        ):
+            network.configure_reverse_dns(True)
+            result = network.resolve_hostnames(["192.0.2.10", "192.0.2.11", "192.0.2.12"])
+
+        self.assertEqual(
+            result,
+            {
+                "192.0.2.10": "192.0.2.10",
+                "192.0.2.11": "192.0.2.11",
+                "192.0.2.12": "192.0.2.12",
+            },
+        )
+
+    def test_resolve_hostnames_threshold_zero_keeps_reverse_dns_unlimited(self):
+        with (
+            patch.dict("os.environ", {"REVERSE_DNS_MAX_UNIQUE_IPS": "0"}),
+            patch.object(
+                network.socket,
+                "gethostbyaddr",
+                side_effect=lambda ip: (f"host-{ip}", [], [ip]),
+            ) as gethostbyaddr,
+        ):
+            network.configure_reverse_dns(True)
+            result = network.resolve_hostnames(["192.0.2.10", "192.0.2.11", "192.0.2.12"])
+
+        self.assertEqual(result["192.0.2.12"], "host-192.0.2.12")
+        self.assertEqual(gethostbyaddr.call_count, 3)
+
     def test_resolve_hostname_refreshes_expired_ttl_cache_entry(self):
         with (
             patch.object(network, "_reverse_dns_cache_ttl", 0.001),

@@ -316,11 +316,13 @@
 - добавлен bounded bulk resolver `resolve_hostnames(ips, max_workers=None)`;
 - direction/policy report builders предрезолвят hostname maps bulk-методом и используют shared cache;
 - добавлены настройки `.env.example`: `REVERSE_DNS_TIMEOUT=0.3`, `REVERSE_DNS_WORKERS=16`, `REVERSE_DNS_CACHE_TTL_SECONDS=86400`, `REVERSE_DNS_CACHE_SIZE=10000`;
+- добавлен `REVERSE_DNS_MAX_UNIQUE_IPS=1000`: для больших отчетов bulk PTR lookup автоматически пропускается, а hostname values остаются IP; `0` отключает этот auto-disable;
 - Web settings update при изменении `DISABLE_REVERSE_DNS` очищает cache и сразу обновляет configured DNS state.
 
 Проверка:
 - `PYTHONPATH=. pytest tests/test_reverse_dns.py tests/test_log_analyzer.py tests/test_web_validation.py -q` → 17 passed;
-- `PYTHONPATH=. pytest -q` → 43 passed;
+- `PYTHONPATH=. pytest tests/test_reverse_dns.py -q` → 8 passed;
+- `PYTHONPATH=. pytest -q` → 45 passed;
 - `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK;
 - production grep по `setdefaulttimeout` → нет вызовов вне tests.
 
@@ -332,7 +334,7 @@
 - [x] добавить bulk/threaded resolver с ограниченным concurrency;
 - [x] добавить LRU/TTL cache;
 - [x] заменить `socket.setdefaulttimeout()` на безопасный механизм без глобального timeout процесса;
-- [ ] для больших отчетов дать возможность автоматически отключать reverse DNS.
+- [x] для больших отчетов дать возможность автоматически отключать reverse DNS.
 
 ### 3.4 Aggregator memory optimization
 
