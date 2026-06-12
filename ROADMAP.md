@@ -128,11 +128,27 @@
 
 ### 1.4 Safer CORS and results path
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- wildcard CORS заменен на allowlist из `WEB_CORS_ALLOW_ORIGINS`;
+- wildcard `*` намеренно игнорируется при разборе CORS allowlist;
+- default CORS allowlist ограничен локальными origins `http://127.0.0.1:8500,http://localhost:8500`;
+- Web settings больше не принимает абсолютный `RESULTS_DIR`;
+- Web settings отклоняет parent traversal вроде `../outside-results`;
+- result endpoints дополнительно проверяют, что текущий results dir остается внутри project root;
+- preview/read endpoint `/api/results/{file_path}` читает только первые `MAX_RESULT_PREVIEW_BYTES` байт и возвращает `truncated`, `size`, `preview_limit`.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_web_guardrails.py -q` → 5 passed;
+- `PYTHONPATH=. pytest -q` → 34 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- заменить wildcard CORS на allowlist из `.env`;
-- запретить опасные абсолютные `RESULTS_DIR` через Web settings;
-- разрешать results только внутри project-controlled директории;
-- добавить лимит размера для preview/read endpoint.
+- [x] заменить wildcard CORS на allowlist из `.env`;
+- [x] запретить опасные абсолютные `RESULTS_DIR` через Web settings;
+- [x] разрешать results только внутри project-controlled директории;
+- [x] добавить лимит размера для preview/read endpoint.
 
 ## Phase 2 — FortiAnalyzer client reliability and compatibility
 

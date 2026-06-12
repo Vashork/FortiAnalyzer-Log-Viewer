@@ -35,7 +35,6 @@ from config import (
     get_dynamic_reverse_dns_enabled,
     get_results_dir_path,
     reload_env,
-    ensure_directories,
     validate_config,
 )
 from utils.network import clear_hostname_cache, load_machines
@@ -46,7 +45,9 @@ from web.job_registry import JobRegistry
 # Р›РѕРіРёСЂРѕРІР°РЅРёРµ РІРµР±-СЃРµСЂРІРµСЂР°
 # ========================
 
-ensure_directories()
+# Create logs directory before configuring file logging. Results directory is created
+# through _ensure_web_directories() after the project-root safety check.
+Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
 
 log_file = Path(LOGS_DIR) / "web_server.log"
 
@@ -86,6 +87,40 @@ MAX_TIME_DAYS_LIMIT = int(os.getenv("MAX_TIME_DAYS_LIMIT", "365"))
 MAX_POLICY_IDS_LIMIT = int(os.getenv("MAX_POLICY_IDS_LIMIT", "100"))
 MAX_TARGETS_LIMIT = int(os.getenv("MAX_TARGETS_LIMIT", "1024"))
 MAX_EXPANDED_TARGETS_LIMIT = int(os.getenv("MAX_EXPANDED_TARGETS_LIMIT", "4096"))
+MAX_RESULT_PREVIEW_BYTES = int(os.getenv("MAX_RESULT_PREVIEW_BYTES", "1048576"))
+DEFAULT_CORS_ORIGINS = "http://127.0.0.1:8500,http://localhost:8500"
+
+
+def _parse_cors_origins(value: str | None = None) -> list[str]:
+    raw_value = value if value is not None else os.getenv("WEB_CORS_ALLOW_ORIGINS", DEFAULT_CORS_ORIGINS)
+    origins = [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+    return [origin for origin in origins if origin != "*"]
+
+
+def _project_controlled_path(path: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("path must stay inside the project directory") from exc
+    return resolved
+
+
+def _validate_results_dir_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("results_dir cannot be empty")
+    results_path = Path(value)
+    if results_path.is_absolute():
+        raise ValueError("results_dir must be a relative path inside the project directory")
+    _project_controlled_path(PROJECT_ROOT / results_path)
+    return value
+
+
+def _ensure_web_directories():
+    _project_controlled_path(get_results_dir_path()).mkdir(parents=True, exist_ok=True)
+    Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
+    (PROJECT_ROOT / "resources").mkdir(parents=True, exist_ok=True)
 
 
 class TargetHost(BaseModel):
@@ -228,6 +263,13 @@ class SettingsUpdate(BaseModel):
     columns: Optional[dict] = None
     aggregation: Optional[dict] = None
     output_format: Optional[Literal["txt", "csv", "both"]] = None
+
+    @field_validator("results_dir")
+    @classmethod
+    def validate_results_dir(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return _validate_results_dir_value(value)
 
     @model_validator(mode="after")
     def validate_settings_limits(self):
@@ -423,7 +465,11 @@ async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ensure_directories()
+    try:
+        _ensure_web_directories()
+    except ValueError as exc:
+        logger.error("Invalid RESULTS_DIR: %s", exc)
+        raise
     logger.info("falv2 web server started")
     yield
     logger.info("falv2 web server stopped")
@@ -433,7 +479,7 @@ app = FastAPI(title="falv2 Web UI", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -534,7 +580,27 @@ def _resolve_result_path(file_path: str) -> Path:
 
 
 def _results_dir_path() -> Path:
-    return get_results_dir_path()
+    try:
+        return _project_controlled_path(get_results_dir_path())
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _read_result_preview(path: Path) -> dict:
+    size = path.stat().st_size
+    read_limit = max(0, MAX_RESULT_PREVIEW_BYTES)
+    with open(path, "rb") as f:
+        raw_content = f.read(read_limit + 1)
+    truncated = len(raw_content) > read_limit or size > read_limit
+    if truncated:
+        raw_content = raw_content[:read_limit]
+    return {
+        "content": raw_content.decode("utf-8", errors="replace"),
+        "name": path.name,
+        "truncated": truncated,
+        "size": size,
+        "preview_limit": read_limit,
+    }
 
 
 def _open_in_explorer(path: Path, select: bool = False):
@@ -582,7 +648,7 @@ async def reveal_results_dir():
 @app.get("/api/results/{file_path:path}")
 async def get_result(file_path: str):
     full_path = _resolve_result_path(file_path)
-    return {"content": full_path.read_text(encoding="utf-8"), "name": full_path.name}
+    return _read_result_preview(full_path)
 
 
 @app.get("/api/resources/machines")
