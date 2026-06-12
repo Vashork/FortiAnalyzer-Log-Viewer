@@ -22,12 +22,14 @@ from config import (
     MACHINES_FILE,
     get_dynamic_batch_size,
     get_dynamic_max_task_hours,
+    get_dynamic_target_group_size,
     get_dynamic_workers,
     get_results_dir_path,
     get_dynamic_split_mode,
     reload_env,
 )
 from utils.network import load_machines
+from utils.batching import group_target_ips
 from utils.output import save_results
 
 
@@ -692,7 +694,8 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
 def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                                     start_time: str, end_time: str, target_ips: list[str], exclude_ips: set[str], ports):
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
-    workers = min(request.workers or get_dynamic_workers(), max(1, len(target_ips)))
+    target_groups = group_target_ips(target_ips, get_dynamic_target_group_size())
+    workers = min(request.workers or get_dynamic_workers(), max(1, len(target_groups)))
     results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -700,11 +703,12 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
     per_ip_results = {}
     collect_lock = Lock()
     queue = Queue()
-    for ip in target_ips:
-        queue.put(ip)
+    for ip_group in target_groups:
+        queue.put(ip_group)
 
     emitter.message(
-        f"Time-split mode: {workers} workers, {len(target_ips)} IPs. Each worker completes a whole IP before taking the next one.",
+        f"Time-split mode: {workers} workers, {len(target_ips)} IPs in {len(target_groups)} groups "
+        f"(TARGET_GROUP_SIZE={get_dynamic_target_group_size()}). Each worker completes a whole group before taking the next one.",
         stage="job",
     )
 
@@ -714,11 +718,12 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
         try:
             while not cancel_check():
                 try:
-                    ip = queue.get_nowait()
+                    ip_group = queue.get_nowait()
                 except Empty:
                     break
 
-                emitter.message(f"Assigned IP {ip}", worker=worker, stage="assignment")
+                group_label = ",".join(ip_group)
+                emitter.message(f"Assigned IP group {group_label}", worker=worker, stage="assignment")
                 for direction in directions:
                     if cancel_check():
                         break
@@ -727,14 +732,14 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
                         label=worker.label,
                         slot_key=worker.slot_key,
                         direction=direction,
-                        target_ip=ip,
+                        target_ip=group_label,
                     )
-                    emitter.message(f"Starting {ip} [{direction}]", worker=task_worker, stage="assignment")
+                    emitter.message(f"Starting group {group_label} [{direction}]", worker=task_worker, stage="assignment")
                     report_dict = _run_faz_search(
                         task_worker,
                         emitter,
                         cancel_check,
-                        target_ips=[ip],
+                        target_ips=ip_group,
                         exclude_ips=list(exclude_ips),
                         start_time=start_time,
                         end_time=end_time,
@@ -746,10 +751,10 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
                     ) or {}
 
                     with collect_lock:
-                        for (_, dir_key), text in report_dict.items():
+                        for (local_ip, dir_key), text in report_dict.items():
                             if text.strip():
                                 direction_text[dir_key].append(text)
-                                per_ip_results.setdefault(ip, {})[dir_key] = text
+                                per_ip_results.setdefault(local_ip, {})[dir_key] = text
                 queue.task_done()
         finally:
             emitter.worker_finished(worker, message="Worker finished")
@@ -811,19 +816,32 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
     per_ip_results = {}
     state_json_str = _build_state_json(request)
 
-    if workers > 1 and len(target_ips) > 1:
-        collect_lock = Lock()
-        emitter.message(f"Parallel mode: {workers} workers, {len(target_ips)} IPs", stage="job")
+    target_groups = group_target_ips(target_ips, get_dynamic_target_group_size())
 
-        def process_ip(ip, direction):
-            worker = WorkerRef(worker_id=f"{ip}:{direction}", label=ip, slot_key=ip, direction=direction, target_ip=ip)
-            emitter.worker_started(worker, message=f"Starting {ip} [{direction}]")
+    if workers > 1 and len(target_groups) > 1:
+        collect_lock = Lock()
+        emitter.message(
+            f"Parallel mode: {workers} workers, {len(target_ips)} IPs in {len(target_groups)} groups "
+            f"(TARGET_GROUP_SIZE={get_dynamic_target_group_size()})",
+            stage="job",
+        )
+
+        def process_ip_group(ip_group, direction):
+            group_label = ",".join(ip_group)
+            worker = WorkerRef(
+                worker_id=f"{group_label}:{direction}",
+                label=group_label,
+                slot_key=group_label,
+                direction=direction,
+                target_ip=group_label,
+            )
+            emitter.worker_started(worker, message=f"Starting group {group_label} [{direction}]")
             try:
                 report_dict = _run_faz_search(
                     worker,
                     emitter,
                     cancel_check,
-                    target_ips=[ip],
+                    target_ips=ip_group,
                     exclude_ips=list(exclude_ips),
                     start_time=start_time,
                     end_time=end_time,
@@ -834,35 +852,42 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                     aggregation=request.aggregation,
                 ) or {}
                 with collect_lock:
-                    for (_, dir_key), text in report_dict.items():
+                    for (local_ip, dir_key), text in report_dict.items():
                         if text.strip():
                             direction_text[dir_key].append(text)
-                            per_ip_results.setdefault(ip, {})[dir_key] = text
+                            per_ip_results.setdefault(local_ip, {})[dir_key] = text
             finally:
-                emitter.worker_finished(worker, message=f"Finished {ip} [{direction}]")
+                emitter.worker_finished(worker, message=f"Finished group {group_label} [{direction}]")
 
         futures_map = {}
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for direction in directions:
-                for ip in target_ips:
-                    future = ex.submit(process_ip, ip, direction)
-                    futures_map[future] = (ip, direction)
+                for ip_group in target_groups:
+                    future = ex.submit(process_ip_group, ip_group, direction)
+                    futures_map[future] = (ip_group, direction)
             for future in as_completed(futures_map):
                 future.result()
     else:
         for direction in directions:
             emitter.message(f"Direction: {direction}", stage="job")
-            for ip in target_ips:
+            for ip_group in target_groups:
                 if cancel_check():
                     raise AnalysisCancelled("Analysis cancelled by user")
-                worker = WorkerRef(worker_id=f"{ip}:{direction}", label=ip, slot_key=ip, direction=direction, target_ip=ip)
-                emitter.worker_started(worker, message=f"Starting {ip} [{direction}]")
+                group_label = ",".join(ip_group)
+                worker = WorkerRef(
+                    worker_id=f"{group_label}:{direction}",
+                    label=group_label,
+                    slot_key=group_label,
+                    direction=direction,
+                    target_ip=group_label,
+                )
+                emitter.worker_started(worker, message=f"Starting group {group_label} [{direction}]")
                 try:
                     report_dict = _run_faz_search(
                         worker,
                         emitter,
                         cancel_check,
-                        target_ips=[ip],
+                        target_ips=ip_group,
                         exclude_ips=list(exclude_ips),
                         start_time=start_time,
                         end_time=end_time,
@@ -872,12 +897,12 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                         columns=request.columns,
                         aggregation=request.aggregation,
                     ) or {}
-                    for (_, dir_key), text in report_dict.items():
+                    for (local_ip, dir_key), text in report_dict.items():
                         if text.strip():
                             direction_text[dir_key].append(text)
-                            per_ip_results.setdefault(ip, {})[dir_key] = text
+                            per_ip_results.setdefault(local_ip, {})[dir_key] = text
                 finally:
-                    emitter.worker_finished(worker, message=f"Finished {ip} [{direction}]")
+                    emitter.worker_finished(worker, message=f"Finished group {group_label} [{direction}]")
 
     all_files = []
     all_texts = {}

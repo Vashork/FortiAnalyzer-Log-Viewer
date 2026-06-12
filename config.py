@@ -41,6 +41,7 @@ def get_results_dir_path() -> Path:
 
 # Performance tuning
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 1))
+TARGET_GROUP_SIZE = int(os.getenv("TARGET_GROUP_SIZE", "1"))
 
 # Лимит подряд идущих пустых батчей при fetch_logs
 EMPTY_BATCH_LIMIT = int(os.getenv("EMPTY_BATCH_LIMIT", 5))
@@ -103,6 +104,16 @@ def get_dynamic_workers() -> int:
     """Динамическое чтение текущего значения MAX_WORKERS из .env."""
     reload_env()
     return int(os.getenv("MAX_WORKERS", 1))
+
+
+def get_dynamic_target_group_size() -> int:
+    """Динамическое чтение TARGET_GROUP_SIZE; default 1 сохраняет старое поведение."""
+    reload_env()
+    try:
+        value = int(os.getenv("TARGET_GROUP_SIZE", TARGET_GROUP_SIZE))
+    except ValueError:
+        return 1
+    return max(1, value)
 
 
 def get_dynamic_batch_size() -> int:

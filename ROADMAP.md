@@ -273,20 +273,36 @@
 
 ### 3.2 IP group batching
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- добавлена настройка `TARGET_GROUP_SIZE=1` в `.env.example` и `config.py`;
+- default `1` сохраняет старое поведение: один FAZ search task на один IP;
+- `utils.batching.group_target_ips()` группирует targets в ordered batches;
+- CLI direction mode теперь отправляет в `analyze_logs()` IP-группы, а не только одиночные IP;
+- Web direction mode и Web time-split-by-IP queue теперь работают с IP-группами;
+- результаты по-прежнему раскладываются по local IP через существующий `aggregate_by_local()` / report keys;
+- progress/log messages показывают количество groups и `TARGET_GROUP_SIZE`.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_ip_group_batching.py tests/test_log_analyzer.py tests/test_web_validation.py -q` → 14 passed;
+- `PYTHONPATH=. pytest -q` → 39 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Идея: сохранить дробление по IP, но добавить группировку IP в один FAZ filter.
 
 Проблема: один FAZ search task на каждый IP может быть слишком дорогим при сотнях IP.
 
 Что сделать:
-- добавить `TARGET_GROUP_SIZE`, например default 1 для полной совместимости;
-- если `TARGET_GROUP_SIZE > 1`, группировать IP по N адресов;
-- использовать уже существующую возможность `build_faz_filter(... target_ips=list ...)`;
-- `aggregate_by_local()` уже умеет раскладывать логи по local IP.
+- [x] добавить `TARGET_GROUP_SIZE`, default 1 для полной совместимости;
+- [x] если `TARGET_GROUP_SIZE > 1`, группировать IP по N адресов;
+- [x] использовать уже существующую возможность `build_faz_filter(... target_ips=list ...)`;
+- [x] `aggregate_by_local()` уже умеет раскладывать логи по local IP.
 
 Критерии готовности:
-- `TARGET_GROUP_SIZE=1` ведет себя как текущая версия;
-- `TARGET_GROUP_SIZE=20/50` уменьшает число FAZ tasks;
-- отчеты по IP остаются прежними.
+- [x] `TARGET_GROUP_SIZE=1` ведет себя как текущая версия;
+- [x] `TARGET_GROUP_SIZE=20/50` уменьшает число FAZ tasks;
+- [x] отчеты по IP остаются прежними.
 
 ### 3.3 Reverse DNS optimization
 

@@ -10,12 +10,14 @@ from config import (
     get_results_dir_path,
     BATCH_SIZE,
     MAX_WORKERS,
+    TARGET_GROUP_SIZE,
     DEFAULT_TIME_RANGE_HOURS,
     validate_config,
     reload_env,
 )
 
 from utils.network import load_machines, load_ports
+from utils.batching import group_target_ips
 from client.faz_client import FortiAnalyzerClient
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
 
@@ -51,9 +53,9 @@ def _append_history(text: str, start_time: str, end_time: str, cmd: str, filenam
 
 
 # ----------------------------------------------------
-# WORKER — ОДИН IP
+# WORKER — IP GROUP
 # ----------------------------------------------------
-def process_single_ip(ip, direction, start_time, end_time, exclude_ips, ports):
+def process_ip_group(ip_group, direction, start_time, end_time, exclude_ips, ports):
     client = _create_faz_client()
 
     if not client.login():
@@ -62,7 +64,7 @@ def process_single_ip(ip, direction, start_time, end_time, exclude_ips, ports):
     try:
         return analyze_logs(
             client=client,
-            target_ips=[ip],
+            target_ips=ip_group,
             direction=direction,
             start_time=start_time,
             end_time=end_time,
@@ -155,16 +157,18 @@ def main():
 
     # аккумулируем вывод строго по направлению
     direction_text = {d: [] for d in directions}
+    target_groups = group_target_ips(target_ips, TARGET_GROUP_SIZE)
+    print(f"🎯 Target groups: {len(target_groups)} (TARGET_GROUP_SIZE={max(1, TARGET_GROUP_SIZE)})")
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = []
 
         for direction in directions:
-            for ip in target_ips:
+            for ip_group in target_groups:
                 futures.append(
                     ex.submit(
-                        process_single_ip,
-                        ip,
+                        process_ip_group,
+                        ip_group,
                         direction,
                         start_time,
                         end_time,
