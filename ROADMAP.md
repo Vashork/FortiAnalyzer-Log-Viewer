@@ -240,19 +240,36 @@
 
 ### 3.1 Keep and optimize IP/time split modes
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- режимы `SESSION_SPLIT_MODE=ip|time` сохранены;
+- direction time-split больше не возвращает raw logs из worker;
+- новый `fetch_local_stats_for_segments()` агрегирует batches сразу внутри worker через `_iter_fetch_log_batches()`;
+- `_run_worker_local_stats()` возвращает `(stats, total_logs)` по worker вместо списка всех logs;
+- финальный этап merge объединяет local stats через `_merge_local_stats()`;
+- legacy raw-log helper удален, в `time_range_analyzer.py` больше нет `all_logs.extend(...)` / `fetch_logs_for_segments` / `_run_worker_segments`;
+- существующий policyid time-split streaming aggregation сохранен.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_time_range_analyzer.py tests/test_faz_client.py tests/test_log_analyzer.py -q` → 17 passed;
+- `PYTHONPATH=. pytest -q` → 36 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK;
+- grep по `analyzer/time_range_analyzer.py` для `all_logs.extend|fetch_logs_for_segments|_run_worker_segments\(` → 0 matches.
+
 Сохраняем:
-- `SESSION_SPLIT_MODE=ip`;
-- `SESSION_SPLIT_MODE=time`.
+- [x] `SESSION_SPLIT_MODE=ip`;
+- [x] `SESSION_SPLIT_MODE=time`.
 
 Улучшения:
-- time-split direction mode должен агрегировать batch-логи сразу внутри worker;
-- worker должен возвращать stats, а не список всех сырых logs;
-- добавить merge для local stats, аналогично `_merge_policy_stats`.
+- [x] time-split direction mode агрегирует batch-логи сразу внутри worker;
+- [x] worker возвращает stats, а не список всех сырых logs;
+- [x] добавлен merge для local stats, аналогично `_merge_policy_stats`.
 
 Критерии готовности:
-- нет `all_logs.extend(...)` на больших result paths там, где можно агрегировать batch-wise;
-- тесты подтверждают идентичный результат до/после на synthetic logs;
-- память не растет пропорционально всему объему raw logs.
+- [x] нет `all_logs.extend(...)` на больших result paths там, где можно агрегировать batch-wise;
+- [x] тесты подтверждают идентичный результат до/после на synthetic logs;
+- [x] память не растет пропорционально всему объему raw logs.
 
 ### 3.2 IP group batching
 

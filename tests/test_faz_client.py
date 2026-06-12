@@ -183,18 +183,22 @@ class TimeSplitWorkerClientCompatibilityTests(unittest.TestCase):
 
         with (
             patch.object(time_range_analyzer, "FortiAnalyzerClient", side_effect=fake_client),
-            patch.object(time_range_analyzer, "fetch_logs_for_segments", return_value=[]),
+            patch.object(time_range_analyzer, "fetch_local_stats_for_segments", return_value=(None, 0)),
         ):
-            result = time_range_analyzer._run_worker_segments(
+            result = time_range_analyzer._run_worker_local_stats(
                 main_client=main_client,
                 filter_str="dstip=10.0.0.1",
                 workers_segments=[[('2026-06-01 00:00:00', '2026-06-01 01:00:00')]],
                 target_ips=["10.0.0.1"],
+                direction="inbound",
+                exclude_ips=[],
+                columns={"connections": True},
+                aggregation=None,
                 batch_size=100,
                 num_workers=1,
             )
 
-        self.assertEqual(result, {0: []})
+        self.assertEqual(result, {0: (None, 0)})
         self.assertEqual(len(created_clients), 1)
         worker = created_clients[0]
         self.assertEqual(worker.verify, "/etc/ssl/faz-ca.pem")
