@@ -290,7 +290,38 @@ def _result_relative_path(path: Path) -> str:
         return path.name
 
 
+def _request_history_state(request) -> dict:
+    targets = []
+    for target in getattr(request, "targets", []) or []:
+        if hasattr(target, "model_dump"):
+            targets.append(target.model_dump())
+        elif isinstance(target, dict):
+            targets.append(target)
+        else:
+            targets.append(getattr(target, "__dict__", str(target)))
+    return {
+        "time_mode": getattr(request, "time_mode", None),
+        "time_value": getattr(request, "time_value", None),
+        "start_time": getattr(request, "start_time", None),
+        "end_time": getattr(request, "end_time", None),
+        "analysis_mode": getattr(request, "analysis_mode", None),
+        "direction": getattr(request, "direction", None),
+        "policyid": getattr(request, "policyid", None),
+        "policyids": getattr(request, "policyids", None),
+        "output_format": getattr(request, "output_format", None),
+        "smart_action": getattr(request, "smart_action", None),
+        "use_machines_file": getattr(request, "use_machines_file", None),
+        "targets": targets,
+        "exclude_internal": getattr(request, "exclude_internal", None),
+        "proto_enabled": getattr(request, "proto_enabled", None),
+        "ports": getattr(request, "ports", None),
+        "columns": getattr(request, "columns", None),
+        "aggregation": getattr(request, "aggregation", None),
+    }
+
+
 def _write_run_metadata(run_dir: Path, run_id: str, request, start_time: str, end_time: str, files: list[dict], status: str = "completed") -> dict:
+    finished_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     metadata = {
         "run_id": run_id,
         "status": status,
@@ -300,15 +331,40 @@ def _write_run_metadata(run_dir: Path, run_id: str, request, start_time: str, en
         "policyids": getattr(request, "policyids", None),
         "start_time": start_time,
         "end_time": end_time,
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": finished_at,
+        "finished_at": finished_at,
+        "duration_seconds": 0,
         "files": [file_info["path"] for file_info in files],
+        "request": _request_history_state(request),
     }
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
 
 
+def _append_history_jsonl(metadata: dict) -> None:
+    history_path = get_results_dir_path() / "history.jsonl"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    request = metadata.get("request") or {}
+    cmd = f"policyid={metadata.get('policyid')}" if metadata.get("analysis_mode") == "policyid" else f"direction={metadata.get('direction')}"
+    row = {
+        "run_id": metadata.get("run_id"),
+        "status": metadata.get("status", "completed"),
+        "started_at": metadata.get("created_at"),
+        "finished_at": metadata.get("finished_at"),
+        "duration_seconds": metadata.get("duration_seconds", 0),
+        "cmd": cmd,
+        "time_range": f"{metadata.get('start_time')} -> {metadata.get('end_time')}",
+        "files": metadata.get("files", []),
+        "request": request,
+        "error": metadata.get("error"),
+    }
+    with open(history_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def _attach_run_metadata(result: dict, run_id: str, run_dir: Path, request, start_time: str, end_time: str) -> dict:
     metadata = _write_run_metadata(run_dir, run_id, request, start_time, end_time, result.get("files", []))
+    _append_history_jsonl(metadata)
     result["run_id"] = run_id
     result["run_dir"] = _result_relative_path(run_dir)
     result["metadata"] = metadata

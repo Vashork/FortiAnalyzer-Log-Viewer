@@ -284,7 +284,66 @@ class SettingsUpdate(BaseModel):
         return self
 
 
-def parse_history() -> List[dict]:
+def _history_entry_from_jsonl(row: dict) -> dict:
+    request = row.get("request") or {}
+    cmd = row.get("cmd") or ""
+    files = row.get("files") or []
+    first_file = files[0] if files else ""
+    policyid = request.get("policyid") or ""
+    if not policyid and "policyid=" in cmd:
+        import re
+        match = re.search(r"policyid=(\d+)", cmd)
+        if match:
+            policyid = match.group(1)
+    direction = request.get("direction") or ""
+    if not direction and "direction=" in cmd:
+        direction = cmd.split("direction=", 1)[1].split()[0].split("&")[0].strip()
+    return {
+        "run_id": row.get("run_id", ""),
+        "timestamp": row.get("finished_at") or row.get("started_at") or "",
+        "cmd": cmd,
+        "time_range": row.get("time_range", ""),
+        "smart_action": request.get("smart_action", ""),
+        "filter_mode": request.get("filter_mode", ""),
+        "file": first_file,
+        "files": files,
+        "status": row.get("status", ""),
+        "duration_seconds": row.get("duration_seconds", 0),
+        "error": row.get("error"),
+        "has_inbound": any("inbound" in file for file in files) or direction == "inbound",
+        "has_outbound": any("outbound" in file for file in files) or direction == "outbound",
+        "has_policy": request.get("analysis_mode") == "policyid" or "policyid=" in cmd,
+        "direction": direction,
+        "exclude_used": bool(request.get("exclude_internal")),
+        "policyid": str(policyid) if policyid else "",
+        "summary_lines": [],
+        "state": request,
+    }
+
+
+def _parse_history_jsonl(limit: int = 50, offset: int = 0) -> List[dict]:
+    history_path = get_results_dir_path() / "history.jsonl"
+    if not history_path.exists():
+        return []
+    entries = []
+    with open(history_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(_history_entry_from_jsonl(json.loads(line)))
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse history JSONL row: {line}")
+    entries = list(reversed(entries))
+    return entries[max(0, offset):max(0, offset) + max(0, limit)]
+
+
+def parse_history(limit: int = 50, offset: int = 0) -> List[dict]:
+    jsonl_entries = _parse_history_jsonl(limit=limit, offset=offset)
+    if jsonl_entries:
+        return jsonl_entries
+
     history_path = get_results_dir_path() / "history.txt"
     if not history_path.exists():
         return []
@@ -372,7 +431,8 @@ def parse_history() -> List[dict]:
 
         entries.append(entry)
 
-    return list(reversed(entries))
+    entries = list(reversed(entries))
+    return entries[max(0, offset):max(0, offset) + max(0, limit)]
 
 
 def _sanitize_env_value(val: str) -> str:
@@ -697,8 +757,10 @@ async def get_internal_ips():
 
 
 @app.get("/api/history")
-async def get_history():
-    return {"entries": parse_history()}
+async def get_history(limit: int = 50, offset: int = 0):
+    limit = max(0, min(limit, 500))
+    offset = max(0, offset)
+    return {"entries": parse_history(limit=limit, offset=offset), "limit": limit, "offset": offset}
 
 
 @app.get("/api/settings")

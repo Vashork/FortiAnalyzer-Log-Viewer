@@ -418,10 +418,26 @@
 
 ### 4.2 History storage
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- добавлен структурированный `results/history.jsonl` вместо зависимости только от монолитного `history.txt`;
+- каждый завершенный Web run через `_attach_run_metadata()` append-ит JSONL row с `run_id`, `status`, `started_at`, `finished_at`, `duration_seconds`, `cmd`, `time_range`, `files`, `request`, `error`;
+- `metadata.json` расширен полями `finished_at`, `duration_seconds`, `request`;
+- `parse_history(limit, offset)` сначала читает JSONL, а legacy `history.txt` остается fallback для старых данных;
+- `/api/history?limit=&offset=` возвращает paginated entries и metadata `limit`/`offset`;
+- limit ограничен сверху `500`, offset нормализуется к `>=0`.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_web_history.py -q` → 4 passed;
+- `PYTHONPATH=. pytest tests/test_web_history.py tests/test_run_results.py tests/test_web_guardrails.py tests/test_web_validation.py -q` → 16 passed;
+- `PYTHONPATH=. pytest -q` → 59 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- перейти с монолитного `history.txt` на JSONL или SQLite;
-- хранить request, status, started_at, finished_at, duration, files, error;
-- добавить пагинацию `/api/history?limit=&offset=`.
+- [x] перейти с монолитного `history.txt` на JSONL или SQLite;
+- [x] хранить request, status, started_at, finished_at, duration, files, error;
+- [x] добавить пагинацию `/api/history?limit=&offset=`.
 
 ### 4.3 Results preview/download
 
