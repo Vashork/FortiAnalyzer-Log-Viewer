@@ -151,10 +151,27 @@
 
 ### 2.3 Better retry/backoff
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- `_post()` ретраит transient network ошибки `requests.ConnectionError` и `requests.Timeout`;
+- `_post()` ретраит только явно transient HTTP statuses: `429`, `500`, `502`, `503`, `504`;
+- HTTP auth/client ошибки вроде `401` не ретраятся и сразу пробрасываются наверх;
+- retry-настройки читаются из env:
+  - `FORTIANALYZER_RETRY_ATTEMPTS=3`;
+  - `FORTIANALYZER_RETRY_BACKOFF_SECONDS=1`;
+- retry-настройки наследуются worker-клиентами time-split через `transport_kwargs()`;
+- retry-логи не содержат username/password/session token.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_faz_client.py -q` → 9 passed;
+- `PYTHONPATH=. pytest -q` → 18 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- добавить retry/backoff для transient ошибок FAZ/API;
-- не ретраить login/password ошибки;
-- логировать task id/request context без секретов.
+- [x] добавить retry/backoff для transient ошибок FAZ/API;
+- [x] не ретраить login/password ошибки;
+- [x] логировать request retry context без секретов.
 
 ## Phase 3 — Performance and memory optimization
 

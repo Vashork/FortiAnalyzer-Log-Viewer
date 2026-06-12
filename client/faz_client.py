@@ -46,6 +46,8 @@ class FortiAnalyzerClient:
         pool_maxsize: int = 10,
         connect_timeout: int = 5,
         read_timeout: int = 30,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: int = 1,
     ):
         self.url = url
         self.username = username
@@ -61,6 +63,8 @@ class FortiAnalyzerClient:
         self.pool_maxsize = pool_maxsize
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
+        self.retry_attempts = max(1, retry_attempts)
+        self.retry_backoff_seconds = max(0, retry_backoff_seconds)
         self.http = requests.Session()
         adapter = HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize)
         self.http.mount("https://", adapter)
@@ -84,6 +88,8 @@ class FortiAnalyzerClient:
             pool_maxsize=_env_int("FORTIANALYZER_POOL_MAXSIZE", 10),
             connect_timeout=_env_int("FORTIANALYZER_CONNECT_TIMEOUT", 5),
             read_timeout=_env_int("FORTIANALYZER_READ_TIMEOUT", 30),
+            retry_attempts=_env_int("FORTIANALYZER_RETRY_ATTEMPTS", 3),
+            retry_backoff_seconds=_env_int("FORTIANALYZER_RETRY_BACKOFF_SECONDS", 1),
         )
 
     def transport_kwargs(self) -> Dict:
@@ -95,17 +101,48 @@ class FortiAnalyzerClient:
             "pool_maxsize": self.pool_maxsize,
             "connect_timeout": self.connect_timeout,
             "read_timeout": self.read_timeout,
+            "retry_attempts": self.retry_attempts,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
         }
 
     # ==========================
     #  Low-level wrapper
     # ==========================
 
+    @staticmethod
+    def _is_retryable_http_error(exc: requests.HTTPError) -> bool:
+        response = exc.response
+        status_code = response.status_code if response is not None else None
+        return status_code in {429, 500, 502, 503, 504}
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        if self.retry_backoff_seconds <= 0:
+            return
+        time.sleep(self.retry_backoff_seconds * attempt)
+
     def _post(self, payload: Dict, timeout: Optional[Union[int, Tuple[int, int]]] = None) -> Dict:
         request_timeout = timeout if timeout is not None else (self.connect_timeout, self.read_timeout)
-        response = self.http.post(self.url, json=payload, timeout=request_timeout, verify=self.verify)
-        response.raise_for_status()
-        return response.json()
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = self.http.post(self.url, json=payload, timeout=request_timeout, verify=self.verify)
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as exc:
+                last_error = exc
+                if not self._is_retryable_http_error(exc) or attempt >= self.retry_attempts:
+                    raise
+                print(f"⚠ Transient FAZ HTTP error, retrying ({attempt}/{self.retry_attempts}): {exc}")
+                self._sleep_before_retry(attempt)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
+                if attempt >= self.retry_attempts:
+                    raise
+                print(f"⚠ Transient FAZ network error, retrying ({attempt}/{self.retry_attempts}): {exc}")
+                self._sleep_before_retry(attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("FortiAnalyzer request failed without an exception")
 
     @staticmethod
     def _normalize_result(payload: Dict) -> Dict:
