@@ -3,10 +3,11 @@ import io
 import json
 import os
 import re
+import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock
@@ -268,6 +269,52 @@ def _append_history_simple(text: str, start_time: str, end_time: str, cmd: str, 
         f.write(text.rstrip() + "\n")
 
 
+def _generate_run_id() -> str:
+    return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
+
+
+def _create_run_dir(run_id: Optional[str] = None):
+    results_root = get_results_dir_path()
+    results_root.mkdir(parents=True, exist_ok=True)
+    run_id = run_id or _generate_run_id()
+    run_dir = results_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_id, run_dir
+
+
+def _result_relative_path(path: Path) -> str:
+    results_root = get_results_dir_path().resolve()
+    try:
+        return str(path.resolve().relative_to(results_root)).replace("\\", "/")
+    except ValueError:
+        return path.name
+
+
+def _write_run_metadata(run_dir: Path, run_id: str, request, start_time: str, end_time: str, files: list[dict], status: str = "completed") -> dict:
+    metadata = {
+        "run_id": run_id,
+        "status": status,
+        "analysis_mode": request.analysis_mode,
+        "direction": getattr(request, "direction", None),
+        "policyid": getattr(request, "policyid", None),
+        "policyids": getattr(request, "policyids", None),
+        "start_time": start_time,
+        "end_time": end_time,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files": [file_info["path"] for file_info in files],
+    }
+    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return metadata
+
+
+def _attach_run_metadata(result: dict, run_id: str, run_dir: Path, request, start_time: str, end_time: str) -> dict:
+    metadata = _write_run_metadata(run_dir, run_id, request, start_time, end_time, result.get("files", []))
+    result["run_id"] = run_id
+    result["run_dir"] = _result_relative_path(run_dir)
+    result["metadata"] = metadata
+    return result
+
+
 def _save_result(text, emitter: SchedulerEmitter, results_dir, name_prefix, start_time, end_time, cmd_label,
                  output_format, worker: Optional[WorkerRef] = None, state_json: Optional[str] = None):
     files = []
@@ -275,15 +322,16 @@ def _save_result(text, emitter: SchedulerEmitter, results_dir, name_prefix, star
 
     txt_file = results_dir / f"{name_prefix}.txt"
     save_results(text, txt_file)
-    _append_history_simple(text, start_time, end_time, cmd_label, txt_file.name, state_json=state_json)
-    files.append({"name": txt_file.name, "path": txt_file.name})
+    txt_rel_path = _result_relative_path(txt_file)
+    _append_history_simple(text, start_time, end_time, cmd_label, txt_rel_path, state_json=state_json)
+    files.append({"name": txt_file.name, "path": txt_rel_path})
     result_data[f"{name_prefix}.txt"] = text
 
     if output_format in ("csv", "both"):
         csv_text = _text_to_csv(text)
         csv_file = results_dir / f"{name_prefix}.csv"
         csv_file.write_text(csv_text, encoding="utf-8")
-        files.append({"name": csv_file.name, "path": csv_file.name})
+        files.append({"name": csv_file.name, "path": _result_relative_path(csv_file)})
         result_data[f"{name_prefix}.csv"] = csv_text
 
     emitter.message(f"Saved result: {name_prefix}.{output_format}", worker=worker, stage="save")
@@ -591,8 +639,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
 
     split_mode = get_dynamic_split_mode()
     workers = request.workers or get_dynamic_workers()
-    results_dir = get_results_dir_path()
-    results_dir.mkdir(parents=True, exist_ok=True)
+    run_id, results_dir = _create_run_dir()
 
     all_files = []
     all_texts = {}
@@ -733,7 +780,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
         all_files.extend(files)
         all_texts.update(texts)
 
-    return {"files": all_files, "texts": all_texts}
+    return _attach_run_metadata({"files": all_files, "texts": all_texts}, run_id, results_dir, request, start_time, end_time)
 
 
 def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
@@ -741,8 +788,7 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
     target_groups = group_target_ips(target_ips, get_dynamic_target_group_size())
     workers = min(request.workers or get_dynamic_workers(), max(1, len(target_groups)))
-    results_dir = get_results_dir_path()
-    results_dir.mkdir(parents=True, exist_ok=True)
+    run_id, results_dir = _create_run_dir()
 
     direction_text = {direction: [] for direction in directions}
     per_ip_results = {}
@@ -831,7 +877,7 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
     if per_ip_results and all(len(value) > 0 for value in per_ip_results.values()):
         all_texts["per_ip"] = per_ip_results
 
-    return {"files": all_files, "texts": all_texts}
+    return _attach_run_metadata({"files": all_files, "texts": all_texts}, run_id, results_dir, request, start_time, end_time)
 
 
 def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
@@ -855,8 +901,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
         )
 
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
-    results_dir = get_results_dir_path()
-    results_dir.mkdir(parents=True, exist_ok=True)
+    run_id, results_dir = _create_run_dir()
     direction_text = {direction: [] for direction in directions}
     per_ip_results = {}
     state_json_str = _build_state_json(request)
@@ -970,7 +1015,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
     if per_ip_results and all(len(value) > 0 for value in per_ip_results.values()):
         all_texts["per_ip"] = per_ip_results
 
-    return {"files": all_files, "texts": all_texts}
+    return _attach_run_metadata({"files": all_files, "texts": all_texts}, run_id, results_dir, request, start_time, end_time)
 
 
 def run_analysis_request(request, emit: EventCallback, cancel_check: CancelCheck):

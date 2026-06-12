@@ -395,12 +395,26 @@
 
 ### 4.1 Unique run_id and result directories
 
-Проблема: `inbound.txt`, `outbound.txt`, `policy_*.txt` могут перезаписываться.
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- Web analysis создает уникальный `run_id` формата `YYYYMMDDTHHMMSSZ-xxxxxxxx`;
+- результаты сохраняются в отдельную директорию `results/<run_id>/...`, поэтому `inbound.txt`, `outbound.txt`, `policy_*.txt` больше не перезаписывают предыдущие запуски;
+- API result payload возвращает `run_id`, `run_dir` и file paths вида `<run_id>/inbound.txt`, совместимые с существующими preview/download endpoints;
+- `_save_result()` теперь возвращает paths относительно root results dir, даже если файл лежит в run subdir;
+- для каждого run пишется `metadata.json` со статусом, типом анализа, временем запроса и списком файлов;
+- legacy `history.txt` пока сохранен для совместимости до пункта 4.2, но `FILE:` теперь содержит run-scoped path.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_run_results.py -q` → 2 passed;
+- `PYTHONPATH=. pytest tests/test_run_results.py tests/test_web_history.py tests/test_web_guardrails.py -q` → 8 passed;
+- `PYTHONPATH=. pytest -q` → 56 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
 
 Что сделать:
-- создать `run_id` для каждого анализа;
-- сохранять результаты в `results/<run_id>/...`;
-- хранить metadata о run.
+- [x] создать `run_id` для каждого анализа;
+- [x] сохранять результаты в `results/<run_id>/...`;
+- [x] хранить metadata о run.
 
 ### 4.2 History storage
 
