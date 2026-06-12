@@ -40,6 +40,7 @@ from config import (
 )
 from utils.network import clear_hostname_cache, load_machines
 from web.analysis_scheduler import AnalysisCancelled, run_analysis_request
+from web.job_registry import JobRegistry
 
 # ========================
 # Р›РѕРіРёСЂРѕРІР°РЅРёРµ РІРµР±-СЃРµСЂРІРµСЂР°
@@ -381,34 +382,30 @@ def update_env_file(updates: dict):
 # SSE РїСЂРѕРіСЂРµСЃСЃ
 # ========================
 
-_analyze_semaphore = asyncio.Semaphore(2)
+MAX_ACTIVE_ANALYSIS_JOBS = int(os.getenv("MAX_ACTIVE_ANALYSIS_JOBS", "2"))
+_job_registry = JobRegistry(max_active=MAX_ACTIVE_ANALYSIS_JOBS)
 _progress_queues: dict[str, asyncio.Queue] = {}
-_cancel_flags: dict[str, bool] = {}  # request_id -> True если отменено
 
 
 async def run_analysis_in_thread(request: AnalysisRequest, request_id: str):
     loop = asyncio.get_event_loop()
     queue = asyncio.Queue()
     _progress_queues[request_id] = queue
-    _cancel_flags[request_id] = False  # флаг отмены
 
     def emit(event: dict):
         loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def done(result: dict):
-        _cancel_flags.pop(request_id, None)  # cleanup
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "done", "result": result})
 
     def cancelled(message: str):
-        _cancel_flags.pop(request_id, None)
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "cancelled", "message": message})
 
     def error(msg: str):
-        _cancel_flags.pop(request_id, None)  # cleanup
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": msg, "ip": None})
 
     def is_cancelled() -> bool:
-        return _cancel_flags.get(request_id, False)
+        return _job_registry.is_cancelled(request_id)
 
     def run():
         try:
@@ -465,31 +462,33 @@ async def favicon():
 async def analyze_stream(request: AnalysisRequest):
     validate_config()
 
-    # Rate limiting
-    if _analyze_semaphore.locked():
-        raise HTTPException(status_code=429, detail="Too many concurrent analyses (max 2)")
-
     import uuid
     request_id = str(uuid.uuid4())
+    if not _job_registry.start(request_id):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent analyses (max {MAX_ACTIVE_ANALYSIS_JOBS})",
+        )
 
-    async with _analyze_semaphore:
-        await run_analysis_in_thread(request, request_id)
-        queue = _progress_queues.get(request_id, asyncio.Queue())
+    await run_analysis_in_thread(request, request_id)
+    queue = _progress_queues.get(request_id, asyncio.Queue())
 
     async def event_generator():
-        # Отправляем request_id первым сообщением
-        yield f"data: {json.dumps({'type': 'request_id', 'request_id': request_id}, ensure_ascii=False)}\n\n"
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=120)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") in ("done", "error", "cancelled"):
-                    # Cleanup
-                    _progress_queues.pop(request_id, None)
-                    break
-            except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'timeout'}, ensure_ascii=False)}\n\n"
-                continue
+        try:
+            # Отправляем request_id первым сообщением
+            yield f"data: {json.dumps({'type': 'request_id', 'request_id': request_id}, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=120)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    if event.get("type") in ("done", "error", "cancelled"):
+                        break
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'timeout'}, ensure_ascii=False)}\n\n"
+                    continue
+        finally:
+            _progress_queues.pop(request_id, None)
+            _job_registry.finish(request_id)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -497,8 +496,7 @@ async def analyze_stream(request: AnalysisRequest):
 @app.post("/api/analyze/cancel/{request_id}")
 async def cancel_analysis(request_id: str):
     """Отменить текущий анализ."""
-    if request_id in _cancel_flags:
-        _cancel_flags[request_id] = True
+    if _job_registry.cancel(request_id):
         return {"status": "cancelled", "request_id": request_id}
     raise HTTPException(status_code=404, detail="Analysis not found")
 

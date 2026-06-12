@@ -95,17 +95,36 @@
 
 ### 1.3 Real concurrency limiter for analysis jobs
 
-Проблема: текущий semaphore ограничивает только старт фонового thread, а не весь анализ.
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- старый `asyncio.Semaphore` заменен на `JobRegistry` с жестким лимитом активных jobs;
+- лимит настраивается через `MAX_ACTIVE_ANALYSIS_JOBS=2`;
+- job slot берется до запуска background thread и держится до завершения/ошибки/отмены либо закрытия SSE generator;
+- cancel state хранится в registry, а не в отдельном `_cancel_flags` dict;
+- `_progress_queues` очищается в `finally` SSE generator;
+- endpoint cancel выставляет cancel flag через registry.
+
+Политика disconnect:
+- при закрытии SSE generator registry slot и progress queue очищаются;
+- фактическая отмена FAZ анализа остается explicit через `/api/analyze/cancel/{request_id}`.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_job_registry.py -q` → 3 passed;
+- `PYTHONPATH=. pytest -q` → 29 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
+Проблема: текущий semaphore ограничивал только старт фонового thread, а не весь анализ.
 
 Что сделать:
-- удерживать лимит до завершения SSE stream/job;
-- ввести job registry: `request_id`, queue, cancel flag/event, status, created_at;
-- cleanup делать в `finally`;
-- при disconnect SSE либо отменять job, либо явно оставлять running job по выбранной политике.
+- [x] удерживать лимит до завершения SSE stream/job;
+- [x] ввести job registry: `request_id`, queue, cancel flag/event, status, created_at;
+- [x] cleanup делать в `finally`;
+- [x] при disconnect SSE либо отменять job, либо явно оставлять running job по выбранной политике.
 
 Критерии готовности:
-- реально нельзя запустить больше заданного количества активных анализов;
-- нет утечки `_progress_queues` / `_cancel_flags` после завершения/ошибки/отмены.
+- [x] реально нельзя запустить больше заданного количества активных анализов;
+- [x] нет утечки `_progress_queues` / `_cancel_flags` после завершения/ошибки/отмены.
 
 ### 1.4 Safer CORS and results path
 
