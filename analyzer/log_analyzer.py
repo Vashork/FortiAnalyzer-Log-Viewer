@@ -1,4 +1,5 @@
 from collections import defaultdict
+import os
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
@@ -26,6 +27,24 @@ POLICYID_HOSTNAME_COLUMNS = {
     "srcip": ("SrcHostname", 30),
     "dstip": ("DstHostname", 30),
 }
+HIGH_CARDINALITY_STAT_FIELDS = {
+    "actions",
+    "apps",
+    "srcports",
+    "srcintfs",
+    "dstintfs",
+    "policynames",
+    "devnames",
+    "smart_actions",
+}
+TRUNCATED_VALUE = "<truncated>"
+
+
+def _aggregate_field_value_limit() -> int:
+    try:
+        return int(os.getenv("AGGREGATE_FIELD_VALUE_LIMIT", "1000"))
+    except ValueError:
+        return 1000
 
 
 def _config_bool(config: dict, key: str, default: bool = True) -> bool:
@@ -122,38 +141,28 @@ class LogAnalyzer:
     def _new_local_stats():
         return defaultdict(
             lambda: defaultdict(
-                lambda: {
-                    "count": 0,
-                    "remote_ips": set(),
-                    "actions": set(),
-                    "policyids": set(),
-                    "apps": set(),
-                    "srcports": set(),
-                    "srcintfs": set(),
-                    "dstintfs": set(),
-                    "policynames": set(),
-                    "devnames": set(),
-                    "smart_actions": set(),
-                }
+                lambda: {"count": 0}
             )
         )
 
     @staticmethod
     def _new_policyid_stats():
         return defaultdict(
-            lambda: {
-                "count": 0,
-                "actions": set(),
-                "policyids": set(),
-                "apps": set(),
-                "srcports": set(),
-                "srcintfs": set(),
-                "dstintfs": set(),
-                "policynames": set(),
-                "devnames": set(),
-                "smart_actions": set(),
-            }
+            lambda: {"count": 0}
         )
+
+    @staticmethod
+    def _add_stat_value(entry: dict, field: str, value, capped: bool = False) -> None:
+        values = entry.setdefault(field, set())
+        if capped:
+            limit = _aggregate_field_value_limit()
+            if limit > 0 and len(values) >= limit and str(value) not in values:
+                values.add(TRUNCATED_VALUE)
+                return
+        values.add(str(value))
+
+    def _add_report_stat_value(self, entry: dict, field: str, value) -> None:
+        self._add_stat_value(entry, field, value, capped=field in HIGH_CARDINALITY_STAT_FIELDS)
 
     # ----------------------------------------------------------
     # GROUP LOGS BY LOCAL → REMOTE (inbound/outbound)
@@ -196,31 +205,33 @@ class LogAnalyzer:
             entry = result[local_ip][key]
 
             entry["count"] += 1
-            entry["remote_ips"].add(str(remote_ip))
+            if "remote_ip" not in group_fields:
+                self._add_stat_value(entry, "remote_ips", remote_ip)
 
-            if log.get("smart_action"):
-                entry["actions"].add(log["smart_action"])
-            elif log.get("action"):
-                entry["actions"].add(log["action"])
+            if self.columns.get("action"):
+                if log.get("smart_action"):
+                    self._add_report_stat_value(entry, "actions", log["smart_action"])
+                elif log.get("action"):
+                    self._add_report_stat_value(entry, "actions", log["action"])
             # Smart Action: derive from FAZ raw fields
             # Priority: smart_action > utmaction > action
             sa = log.get("smart_action") or log.get("utmaction") or log.get("utm_action") or log.get("action") or log.get("utm_result")
-            if sa:
-                entry["smart_actions"].add(str(sa))
-            if log.get("policyid") is not None:
-                entry["policyids"].add(str(log["policyid"]))
-            if log.get("app"):
-                entry["apps"].add(log["app"])
-            if log.get("srcport") is not None:
-                entry["srcports"].add(str(log["srcport"]))
-            if log.get("srcintf"):
-                entry["srcintfs"].add(log["srcintf"])
-            if log.get("dstintf"):
-                entry["dstintfs"].add(log["dstintf"])
-            if log.get("policyname"):
-                entry["policynames"].add(log["policyname"])
-            if log.get("devname"):
-                entry["devnames"].add(log["devname"])
+            if self.columns.get("smart_action") and sa:
+                self._add_report_stat_value(entry, "smart_actions", sa)
+            if self.columns.get("policyid") and log.get("policyid") is not None:
+                self._add_stat_value(entry, "policyids", log["policyid"])
+            if self.columns.get("app") and log.get("app"):
+                self._add_report_stat_value(entry, "apps", log["app"])
+            if self.columns.get("srcport") and log.get("srcport") is not None:
+                self._add_report_stat_value(entry, "srcports", log["srcport"])
+            if self.columns.get("srcintf") and log.get("srcintf"):
+                self._add_report_stat_value(entry, "srcintfs", log["srcintf"])
+            if self.columns.get("dstintf") and log.get("dstintf"):
+                self._add_report_stat_value(entry, "dstintfs", log["dstintf"])
+            if self.columns.get("policyname") and log.get("policyname"):
+                self._add_report_stat_value(entry, "policynames", log["policyname"])
+            if self.columns.get("devname") and log.get("devname"):
+                self._add_report_stat_value(entry, "devnames", log["devname"])
 
         return result
 
@@ -295,7 +306,10 @@ class LogAnalyzer:
             ):
                 group_values = dict(zip(group_fields, key))
                 total_conns += d["count"]
-                uniq_ips.update(d.get("remote_ips", set()))
+                if "remote_ip" in group_fields:
+                    uniq_ips.add(group_values["remote_ip"])
+                else:
+                    uniq_ips.update(d.get("remote_ips", set()))
 
                 row_parts = []
                 if "remote_ip" in group_fields:
@@ -360,26 +374,29 @@ class LogAnalyzer:
             key = tuple(values[field] for field in group_fields)
             entry = result[key]
             entry["count"] += 1
-            entry["policyids"].add(policyid)
+
+            if self.columns.get("policyid") and "policyid" not in group_fields:
+                self._add_stat_value(entry, "policyids", policyid)
 
             # Smart Action: derive from FAZ raw fields
             # Priority: smart_action > utmaction > action
             sa = log.get("smart_action") or log.get("utmaction") or log.get("utm_action") or log.get("action") or log.get("utm_result")
-            if sa:
-                entry["actions"].add(str(sa))
-                entry["smart_actions"].add(str(sa))
-            if log.get("app"):
-                entry["apps"].add(log["app"])
-            if log.get("srcport") is not None:
-                entry["srcports"].add(str(log["srcport"]))
-            if log.get("srcintf"):
-                entry["srcintfs"].add(log["srcintf"])
-            if log.get("dstintf"):
-                entry["dstintfs"].add(log["dstintf"])
-            if log.get("policyname"):
-                entry["policynames"].add(log["policyname"])
-            if log.get("devname"):
-                entry["devnames"].add(log["devname"])
+            if self.columns.get("action") and sa:
+                self._add_report_stat_value(entry, "actions", sa)
+            if self.columns.get("smart_action") and sa:
+                self._add_report_stat_value(entry, "smart_actions", sa)
+            if self.columns.get("app") and log.get("app"):
+                self._add_report_stat_value(entry, "apps", log["app"])
+            if self.columns.get("srcport") and log.get("srcport") is not None:
+                self._add_report_stat_value(entry, "srcports", log["srcport"])
+            if self.columns.get("srcintf") and log.get("srcintf"):
+                self._add_report_stat_value(entry, "srcintfs", log["srcintf"])
+            if self.columns.get("dstintf") and log.get("dstintf"):
+                self._add_report_stat_value(entry, "dstintfs", log["dstintf"])
+            if self.columns.get("policyname") and log.get("policyname"):
+                self._add_report_stat_value(entry, "policynames", log["policyname"])
+            if self.columns.get("devname") and log.get("devname"):
+                self._add_report_stat_value(entry, "devnames", log["devname"])
 
         return result
 

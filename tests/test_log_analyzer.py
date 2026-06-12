@@ -142,6 +142,103 @@ class LogAnalyzerAggregationTests(unittest.TestCase):
         self.assertIn("Srcport", report)
         self.assertIn("50123", report)
 
+    def test_local_stats_only_create_sets_for_enabled_columns_and_keep_report_format(self):
+        analyzer = LogAnalyzer(
+            [],
+            columns={"connections": True, "policyid": True},
+        )
+        logs = [
+            {
+                "srcip": "10.0.0.10",
+                "dstip": "8.8.8.8",
+                "dstport": 53,
+                "proto": 17,
+                "policyid": 100,
+                "app": "dns",
+                "policyname": "allow-dns",
+                "devname": "fg-01",
+            }
+        ]
+
+        stats = analyzer.aggregate_by_local(logs, "outbound", ["10.0.0.10"])
+        entry = stats["10.0.0.10"][("8.8.8.8", "53", "udp")]
+        report = analyzer.build_reports_per_local(stats, "outbound", ["10.0.0.10"])[("10.0.0.10", "outbound")]
+
+        self.assertEqual(entry["count"], 1)
+        self.assertEqual(entry["policyids"], {"100"})
+        self.assertNotIn("remote_ips", entry)
+        self.assertNotIn("apps", entry)
+        self.assertNotIn("policynames", entry)
+        self.assertNotIn("devnames", entry)
+        self.assertIn("Remote IP", report)
+        self.assertIn("PolicyID", report)
+        self.assertIn("Total unique remotes: 1", report)
+        self.assertIn("Total connections: 1", report)
+
+    def test_policyid_stats_only_create_sets_for_enabled_columns_and_keep_report_format(self):
+        analyzer = LogAnalyzer(
+            [],
+            columns={"connections": True, "srcport": True},
+        )
+        logs = [
+            {
+                "srcip": "10.0.0.10",
+                "dstip": "10.0.0.20",
+                "srcport": 50123,
+                "dstport": 22,
+                "proto": 6,
+                "policyid": 100,
+                "app": "ssh",
+                "policyname": "admin-ssh",
+                "devname": "fg-01",
+            }
+        ]
+
+        stats = analyzer.aggregate_by_policyid(logs, [])
+        entry = stats[("10.0.0.10", "10.0.0.20", "22", "tcp", "100")]
+        report = analyzer.build_policyid_report(stats, 100)
+
+        self.assertEqual(entry["count"], 1)
+        self.assertEqual(entry["srcports"], {"50123"})
+        self.assertNotIn("policyids", entry)
+        self.assertNotIn("apps", entry)
+        self.assertNotIn("policynames", entry)
+        self.assertNotIn("devnames", entry)
+        self.assertIn("Srcport", report)
+        self.assertIn("50123", report)
+        self.assertIn("Total entries: 1", report)
+
+    def test_high_cardinality_report_fields_are_capped(self):
+        analyzer = LogAnalyzer(
+            [],
+            columns={"connections": True, "app": True, "policyname": True, "devname": True},
+        )
+        logs = [
+            {
+                "srcip": "10.0.0.10",
+                "dstip": "8.8.8.8",
+                "dstport": 53,
+                "proto": 17,
+                "policyid": 100,
+                "app": f"app-{idx}",
+                "policyname": f"policy-{idx}",
+                "devname": f"fg-{idx}",
+            }
+            for idx in range(5)
+        ]
+
+        with patch.dict("os.environ", {"AGGREGATE_FIELD_VALUE_LIMIT": "2"}):
+            stats = analyzer.aggregate_by_local(logs, "outbound", ["10.0.0.10"])
+            entry = stats["10.0.0.10"][("8.8.8.8", "53", "udp")]
+            report = analyzer.build_reports_per_local(stats, "outbound", ["10.0.0.10"])[("10.0.0.10", "outbound")]
+
+        self.assertLessEqual(len(entry["apps"]), 3)
+        self.assertLessEqual(len(entry["policynames"]), 3)
+        self.assertLessEqual(len(entry["devnames"]), 3)
+        self.assertIn("<truncated>", entry["apps"])
+        self.assertIn("<truncated>", report)
+        self.assertIn("Total connections: 5", report)
+
 
 if __name__ == "__main__":
     unittest.main()

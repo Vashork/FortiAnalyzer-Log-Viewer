@@ -338,11 +338,29 @@
 
 ### 3.4 Aggregator memory optimization
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- local/policyid stats entries теперь создаются минимально: только `count`, без eager sets для всех возможных колонок;
+- set-поля создаются lazy только если соответствующая колонка реально включена в report config;
+- `remote_ips` больше не хранится при стандартной группировке по `remote_ip`, потому что unique remotes считаются из ключей группировки;
+- если `AGGREGATE_REMOTE_IP=false`, `remote_ips` сохраняется как fallback для корректного `Total unique remotes`;
+- добавлен cap `AGGREGATE_FIELD_VALUE_LIMIT=1000` для высококардинальных report-полей: `app`, `policyname`, `devname`, interfaces, actions, smart_actions, `srcports`;
+- при превышении cap в отчете появляется marker `<truncated>`, чтобы формат оставался понятным и память не росла без лимита;
+- тесты покрывают lazy stats, сохранение report format и cap высококардинальных полей.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_log_analyzer.py::LogAnalyzerAggregationTests::test_local_stats_only_create_sets_for_enabled_columns_and_keep_report_format tests/test_log_analyzer.py::LogAnalyzerAggregationTests::test_policyid_stats_only_create_sets_for_enabled_columns_and_keep_report_format -q` → 2 passed;
+- `PYTHONPATH=. pytest tests/test_log_analyzer.py::LogAnalyzerAggregationTests::test_high_cardinality_report_fields_are_capped -q` → 1 passed;
+- `PYTHONPATH=. pytest tests/test_log_analyzer.py tests/test_time_range_analyzer.py -q` → 11 passed;
+- `PYTHONPATH=. pytest -q` → 48 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- lazy-create sets только для включенных колонок;
-- cap на высококардинальные поля (`app`, `policyname`, `devname`, etc.);
-- не хранить `remote_ips` там, где unique можно получить из ключей группировки;
-- добавить тесты на сохранение формата отчета.
+- [x] lazy-create sets только для включенных колонок;
+- [x] cap на высококардинальные поля (`app`, `policyname`, `devname`, etc.);
+- [x] не хранить `remote_ips` там, где unique можно получить из ключей группировки;
+- [x] добавить тесты на сохранение формата отчета.
 
 ### 3.5 Progress throttling
 
