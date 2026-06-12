@@ -740,7 +740,10 @@ function resultPathUrl(p) {
 async function viewResult(p) {
     try {
         const d = await (await fetch('/api/results/' + resultPathUrl(p))).json();
-        document.getElementById('result-content').textContent = d.content;
+        const content = d.truncated
+            ? '⚠ Показан фрагмент результата (' + fmtSize(d.preview_bytes || 0) + ', строк: ' + (d.preview_lines || 0) + '). Полный файл доступен через download_url: ' + (d.download_url || ('/api/results/download/' + resultPathUrl(p))) + '\n\n' + d.content
+            : d.content;
+        document.getElementById('result-content').textContent = content;
         document.querySelector('[data-tab="analyze"]').click();
         document.getElementById('idle-panel').classList.add('hidden');
         document.getElementById('progress-panel').classList.add('hidden');

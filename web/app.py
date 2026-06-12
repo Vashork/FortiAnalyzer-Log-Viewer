@@ -88,6 +88,7 @@ MAX_POLICY_IDS_LIMIT = int(os.getenv("MAX_POLICY_IDS_LIMIT", "100"))
 MAX_TARGETS_LIMIT = int(os.getenv("MAX_TARGETS_LIMIT", "1024"))
 MAX_EXPANDED_TARGETS_LIMIT = int(os.getenv("MAX_EXPANDED_TARGETS_LIMIT", "4096"))
 MAX_RESULT_PREVIEW_BYTES = int(os.getenv("MAX_RESULT_PREVIEW_BYTES", "1048576"))
+MAX_RESULT_PREVIEW_LINES = int(os.getenv("MAX_RESULT_PREVIEW_LINES", "2000"))
 DEFAULT_CORS_ORIGINS = "http://127.0.0.1:8500,http://localhost:8500"
 
 
@@ -672,20 +673,49 @@ def _results_dir_path() -> Path:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-def _read_result_preview(path: Path) -> dict:
+def _clamp_result_preview_limits(max_bytes: Optional[int] = None, max_lines: Optional[int] = None) -> tuple[int, int]:
+    configured_bytes = max(0, MAX_RESULT_PREVIEW_BYTES)
+    configured_lines = max(0, MAX_RESULT_PREVIEW_LINES)
+    byte_limit = configured_bytes if max_bytes is None else max(0, min(max_bytes, configured_bytes))
+    line_limit = configured_lines if max_lines is None else max(0, min(max_lines, configured_lines))
+    return byte_limit, line_limit
+
+
+def _read_result_preview(path: Path, result_path: str = "", max_bytes: Optional[int] = None, max_lines: Optional[int] = None) -> dict:
     size = path.stat().st_size
-    read_limit = max(0, MAX_RESULT_PREVIEW_BYTES)
+    read_limit, line_limit = _clamp_result_preview_limits(max_bytes=max_bytes, max_lines=max_lines)
     with open(path, "rb") as f:
         raw_content = f.read(read_limit + 1)
-    truncated = len(raw_content) > read_limit or size > read_limit
-    if truncated:
+
+    byte_truncated = len(raw_content) > read_limit or size > read_limit
+    if byte_truncated:
         raw_content = raw_content[:read_limit]
+
+    decoded_content = raw_content.decode("utf-8", errors="replace")
+    lines = decoded_content.splitlines(keepends=True)
+    total_lines_read = len(lines)
+    line_truncated = line_limit > 0 and len(lines) > line_limit
+    if line_truncated:
+        lines = lines[:line_limit]
+        decoded_content = "".join(lines)
+    elif line_limit == 0:
+        line_truncated = bool(decoded_content)
+        decoded_content = ""
+        lines = []
+
+    safe_result_path = result_path or path.name
+    download_url = "/api/results/download/" + "/".join(part for part in safe_result_path.replace("\\", "/").split("/") if part)
     return {
-        "content": raw_content.decode("utf-8", errors="replace"),
+        "content": decoded_content,
         "name": path.name,
-        "truncated": truncated,
+        "truncated": byte_truncated or line_truncated,
         "size": size,
         "preview_limit": read_limit,
+        "preview_bytes": read_limit,
+        "preview_lines": len(lines),
+        "total_lines_read": total_lines_read,
+        "line_limit": line_limit,
+        "download_url": download_url,
     }
 
 
@@ -732,9 +762,9 @@ async def reveal_results_dir():
 
 
 @app.get("/api/results/{file_path:path}")
-async def get_result(file_path: str):
+async def get_result(file_path: str, max_bytes: Optional[int] = None, max_lines: Optional[int] = None):
     full_path = _resolve_result_path(file_path)
-    return _read_result_preview(full_path)
+    return _read_result_preview(full_path, result_path=file_path, max_bytes=max_bytes, max_lines=max_lines)
 
 
 @app.get("/api/resources/machines")

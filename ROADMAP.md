@@ -441,10 +441,26 @@
 
 ### 4.3 Results preview/download
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- `/api/results/{file_path}` теперь поддерживает query limits `max_bytes` и `max_lines`;
+- preview ограничивается одновременно по байтам и строкам;
+- значения query limits clamp-ятся настройками `MAX_RESULT_PREVIEW_BYTES` и `MAX_RESULT_PREVIEW_LINES`;
+- preview response расширен полями `preview_bytes`, `preview_lines`, `total_lines_read`, `line_limit`, `download_url`;
+- полный результат остается доступен через `/api/results/download/{file_path:path}`;
+- UI при truncated preview показывает предупреждение `Показан фрагмент...` и download URL, вместо молчаливой вставки неполного результата.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_web_guardrails.py -q` → 8 passed;
+- `PYTHONPATH=. pytest tests/test_web_guardrails.py tests/test_run_results.py tests/test_web_history.py tests/test_web_validation.py -q` → 19 passed;
+- `PYTHONPATH=. pytest -q` → 62 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- API preview с лимитом строк/байт;
-- полный результат отдавать через download endpoint;
-- UI не должен вставлять огромные файлы целиком в DOM.
+- [x] API preview с лимитом строк/байт;
+- [x] полный результат отдавать через download endpoint;
+- [x] UI не должен вставлять огромные файлы целиком в DOM.
 
 ## Phase 5 — Architecture and maintainability
 

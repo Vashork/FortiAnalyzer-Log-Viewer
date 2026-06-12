@@ -75,6 +75,45 @@ class WebGuardrailTests(unittest.TestCase):
         self.assertTrue(payload["truncated"])
         self.assertEqual(payload["size"], 20)
         self.assertEqual(payload["preview_limit"], 10)
+        self.assertEqual(payload["preview_bytes"], 10)
+        self.assertEqual(payload["download_url"], "/api/results/download/large.txt")
+
+    def test_result_preview_respects_line_limit_even_when_byte_limit_is_large(self):
+        web_app = self.import_web_app()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            result_file = results_dir / "multi-line.txt"
+            result_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+            with patch.object(web_app, "_results_dir_path", return_value=results_dir.resolve()):
+                payload = asyncio.run(web_app.get_result("multi-line.txt", max_bytes=1000, max_lines=2))
+
+        self.assertEqual(payload["content"], "line1\nline2\n")
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_lines"], 2)
+        self.assertEqual(payload["total_lines_read"], 3)
+        self.assertEqual(payload["preview_limit"], 1000)
+
+    def test_result_preview_query_limits_are_clamped(self):
+        web_app = self.import_web_app({"MAX_RESULT_PREVIEW_BYTES": "20", "MAX_RESULT_PREVIEW_LINES": "3"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = Path(tmpdir)
+            result_file = results_dir / "large.txt"
+            result_file.write_text("a" * 100, encoding="utf-8")
+
+            with patch.object(web_app, "_results_dir_path", return_value=results_dir.resolve()):
+                payload = asyncio.run(web_app.get_result("large.txt", max_bytes=99999999, max_lines=99999999))
+
+        self.assertEqual(payload["preview_bytes"], 20)
+        self.assertLessEqual(payload["preview_lines"], 3)
+        self.assertTrue(payload["truncated"])
+
+    def test_ui_warns_when_preview_is_truncated_and_keeps_download_path(self):
+        script = (Path(__file__).resolve().parents[1] / "web" / "static" / "script.js").read_text(encoding="utf-8")
+
+        self.assertIn("d.truncated", script)
+        self.assertIn("download_url", script)
+        self.assertIn("Показан фрагмент", script)
 
 
 if __name__ == "__main__":
