@@ -468,12 +468,29 @@
 
 ### 5.1 Request-scoped config
 
+Статус: DONE — 2026-06-12
+
 Проблема: глобальные `config.COLUMNS_CONFIG`, `config.SMART_ACTION` могут конфликтовать между параллельными анализами.
 
+Реализовано:
+- добавлен immutable `analyzer.analysis_config.AnalysisConfig`;
+- `AnalysisConfig.from_request()` создает request-scoped snapshot `smart_action`, `filter_mode`, `columns`, `aggregation`;
+- dict-поля копируются и оборачиваются в `MappingProxyType`, поэтому поздние изменения request/UI dict не протекают в запущенный анализ;
+- Web request path больше не мутирует `config.COLUMNS_CONFIG` и `config.SMART_ACTION` в `_collect_request_context()`;
+- `build_faz_filter()` и `build_policy_faz_filter()` принимают explicit `smart_action` / `filter_mode`;
+- `analyze_logs()`, `analyze_policyid_logs()`, `analyze_logs_time_split()`, `analyze_policyid_logs_time_split()` прокидывают explicit smart filter config;
+- Web orchestration создает per-mode `AnalysisConfig` и передает snapshot в analyzer calls.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_request_scoped_config.py -q` → 3 passed;
+- `PYTHONPATH=. pytest tests/test_request_scoped_config.py tests/test_log_analyzer.py tests/test_time_range_analyzer.py tests/test_run_results.py tests/test_web_history.py -q` → 20 passed;
+- `PYTHONPATH=. pytest -q` → 65 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- ввести immutable `AnalysisConfig`;
-- передавать настройки явно в analyzer/filter builder;
-- убрать изменение module-level config из request path.
+- [x] ввести immutable `AnalysisConfig`;
+- [x] передавать настройки явно в analyzer/filter builder;
+- [x] убрать изменение module-level config из request path.
 
 ### 5.2 Remove client monkey-patching
 

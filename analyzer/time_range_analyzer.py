@@ -56,11 +56,15 @@ def fetch_local_stats_for_segments(
     progress=None,
     worker_label: str = "",
     cancel_check=None,
+    smart_action: Optional[str] = None,
+    filter_mode: Optional[str] = None,
 ):
     """
     Fetch assigned time segments and aggregate direction-mode stats batch-wise.
     This avoids keeping all raw logs for the worker in memory.
     """
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
     stats = None
     total_logs = 0
     total_segments = len(segments)
@@ -105,8 +109,8 @@ def fetch_local_stats_for_segments(
             progress(f"  ✅ Found {matched} logs, fetching...", ip=worker_label)
 
         for logs_batch in _iter_fetch_log_batches(client, tid, matched, batch_size):
-            if FILTER_MODE == "local":
-                logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+            if effective_filter_mode == "local":
+                logs_batch = _filter_logs_by_smart_action(logs_batch, effective_smart_action)
             if not logs_batch:
                 continue
             total_logs += len(logs_batch)
@@ -144,6 +148,8 @@ def _run_worker_local_stats(
     progress=None,
     cancel_check=None,
     worker_label_prefix: str = "W",
+    smart_action: Optional[str] = None,
+    filter_mode: Optional[str] = None,
 ):
     """
     Direction-mode worker pattern: each worker aggregates batches locally and
@@ -184,6 +190,8 @@ def _run_worker_local_stats(
                 progress=progress,
                 worker_label=label,
                 cancel_check=cancel_check,
+                smart_action=smart_action,
+                filter_mode=filter_mode,
             )
             if progress:
                 progress(f"  ✅ {label}: complete ({total_logs} logs)", ip=label)
@@ -235,11 +243,15 @@ def analyze_logs_time_split(
     aggregation: Optional[dict] = None,
     progress=None,
     cancel_check=None,  # callable() -> bool
+    smart_action: Optional[str] = None,
+    filter_mode: Optional[str] = None,
 ) -> Dict[Tuple[str, str], str]:
     """
     Основной интерфейс для дробления по времени (direction mode).
     """
-    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
+    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips, smart_action=effective_smart_action, filter_mode=effective_filter_mode)
 
     if progress:
         ips_str = ", ".join(target_ips[:5])
@@ -269,6 +281,8 @@ def analyze_logs_time_split(
         num_workers=num_workers,
         progress=progress,
         cancel_check=cancel_check,
+        smart_action=effective_smart_action,
+        filter_mode=effective_filter_mode,
         worker_label_prefix="W",
     )
 
@@ -307,11 +321,15 @@ def analyze_policyid_logs_time_split(
     aggregation: Optional[dict] = None,
     progress=None,
     cancel_check=None,  # callable() -> bool
+    smart_action: Optional[str] = None,
+    filter_mode: Optional[str] = None,
 ) -> str:
     """
     Основной интерфейс для дробления по времени (policyid mode).
     """
-    filter_str = build_policy_faz_filter(policyid, target_ips, ports)
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
+    filter_str = build_policy_faz_filter(policyid, target_ips, ports, smart_action=effective_smart_action, filter_mode=effective_filter_mode)
 
     if progress:
         progress(f"🔎 PolicyID={policyid}: time-split, {num_workers} workers")
@@ -365,8 +383,8 @@ def analyze_policyid_logs_time_split(
                     matched = MAX_MATCHED_LOGS_PER_TASK
 
                 for logs_batch in _iter_fetch_log_batches(w_client, tid, matched, batch_size):
-                    if FILTER_MODE == "local":
-                        logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+                    if effective_filter_mode == "local":
+                        logs_batch = _filter_logs_by_smart_action(logs_batch, effective_smart_action)
                     if not logs_batch:
                         continue
                     total_logs += len(logs_batch)

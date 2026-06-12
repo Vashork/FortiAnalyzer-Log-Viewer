@@ -518,8 +518,10 @@ def _iter_fetch_log_batches(client, task_id: int, total_logs: int, batch_size: i
 # ----------------------------------------------------------
 # FAZ FILTERS
 # ----------------------------------------------------------
-def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None):
+def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None, smart_action: Optional[str] = None, filter_mode: Optional[str] = None):
     exclude_ips = exclude_ips or []
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
 
     if direction == "inbound":
         local_field = "dstip"
@@ -534,8 +536,8 @@ def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None):
         vals = ",".join([f'"{ip}"' for ip in target_ips])
         combined = f"({local_field} in [{vals}])"
 
-    if FILTER_MODE == "faz":
-        smart_expr = SMART_ACTION_MAP.get(SMART_ACTION)
+    if effective_filter_mode == "faz":
+        smart_expr = SMART_ACTION_MAP.get(effective_smart_action)
         if smart_expr:
             combined += f" and ({smart_expr})"
 
@@ -549,11 +551,13 @@ def build_faz_filter(direction, target_ips, ports=None, exclude_ips=None):
     return combined
 
 
-def build_policy_faz_filter(policyid: int, target_ips: List[str], ports=None) -> str:
+def build_policy_faz_filter(policyid: int, target_ips: List[str], ports=None, smart_action: Optional[str] = None, filter_mode: Optional[str] = None) -> str:
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
     parts = [f"(policyid={policyid})"]
 
-    if FILTER_MODE == "faz":
-        smart_expr = SMART_ACTION_MAP.get(SMART_ACTION)
+    if effective_filter_mode == "faz":
+        smart_expr = SMART_ACTION_MAP.get(effective_smart_action)
         if smart_expr:
             parts.append(f"({smart_expr})")
 
@@ -586,8 +590,12 @@ def analyze_logs(
         columns=None,
         aggregation=None,
         progress=None,
+        smart_action: Optional[str] = None,
+        filter_mode: Optional[str] = None,
 ):
-    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips)
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
+    filter_str = build_faz_filter(direction, target_ips, ports, exclude_ips, smart_action=effective_smart_action, filter_mode=effective_filter_mode)
 
     if progress:
         progress(f"📡 {direction}: {len(target_ips)} IPs, {start_time} → {end_time}")
@@ -613,8 +621,8 @@ def analyze_logs(
             matched = MAX_MATCHED_LOGS_PER_TASK
 
         for logs_batch in _iter_fetch_log_batches(client, tid, matched, batch_size):
-            if FILTER_MODE == "local":
-                logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+            if effective_filter_mode == "local":
+                logs_batch = _filter_logs_by_smart_action(logs_batch, effective_smart_action)
             if not logs_batch:
                 continue
             total_logs += len(logs_batch)
@@ -652,12 +660,16 @@ def analyze_policyid_logs(
         columns=None,
         aggregation=None,
         progress=None,
+        smart_action: Optional[str] = None,
+        filter_mode: Optional[str] = None,
 ):
-    filter_str = build_policy_faz_filter(policyid, target_ips, ports)
+    effective_smart_action = SMART_ACTION if smart_action is None else smart_action
+    effective_filter_mode = FILTER_MODE if filter_mode is None else filter_mode
+    filter_str = build_policy_faz_filter(policyid, target_ips, ports, smart_action=effective_smart_action, filter_mode=effective_filter_mode)
 
     print(f"🔎 FILTER: {filter_str}")
     print(f"🕒 TIME RANGE: {start_time} → {end_time}")
-    print(f"⚙ SMART_ACTION={SMART_ACTION}, FILTER_MODE={FILTER_MODE}")
+    print(f"⚙ SMART_ACTION={effective_smart_action}, FILTER_MODE={effective_filter_mode}")
 
     time_ranges = split_time_range_safe(start_time, end_time, MAX_TASK_HOURS)
     analyzer = LogAnalyzer(exclude_ips, columns=columns, aggregation=aggregation)
@@ -679,8 +691,8 @@ def analyze_policyid_logs(
             matched = MAX_MATCHED_LOGS_PER_TASK
 
         for logs_batch in _iter_fetch_log_batches(client, tid, matched, batch_size):
-            if FILTER_MODE == "local":
-                logs_batch = _filter_logs_by_smart_action(logs_batch, SMART_ACTION)
+            if effective_filter_mode == "local":
+                logs_batch = _filter_logs_by_smart_action(logs_batch, effective_smart_action)
             if not logs_batch:
                 continue
             total_logs += len(logs_batch)

@@ -13,11 +13,11 @@ from queue import Empty, Queue
 from threading import Lock
 from typing import Callable, Optional
 
+from analyzer.analysis_config import AnalysisConfig
 from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs, split_time_range_safe
 from analyzer.time_range_analyzer import analyze_policyid_logs_time_split
 from client.faz_client import FortiAnalyzerClient
 from config import (
-    COLUMNS_CONFIG,
     EMPTY_BATCH_LIMIT,
     INTERNAL_IPS_FILE,
     MACHINES_FILE,
@@ -607,7 +607,14 @@ def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: Scheduler
 
 def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: CancelCheck, *,
                     target_ips, exclude_ips, start_time, end_time, batch_size, ports,
-                    direction=None, policyid=None, columns=None, aggregation=None):
+                    direction=None, policyid=None, columns=None, aggregation=None,
+                    smart_action: Optional[str] = None, filter_mode: Optional[str] = None,
+                    analysis_config: Optional[AnalysisConfig] = None):
+    if analysis_config is not None:
+        columns = analysis_config.columns
+        aggregation = analysis_config.aggregation
+        smart_action = analysis_config.smart_action
+        filter_mode = analysis_config.filter_mode
     client = FortiAnalyzerClient.from_env(cancel_check=cancel_check)
     if not client.login():
         return None
@@ -628,6 +635,8 @@ def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: 
                 columns=columns,
                 aggregation=aggregation,
                 progress=progress,
+                smart_action=smart_action,
+                filter_mode=filter_mode,
             )
         return analyze_logs(
             client=client,
@@ -641,6 +650,8 @@ def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: 
             columns=columns,
             aggregation=aggregation,
             progress=progress,
+            smart_action=smart_action,
+            filter_mode=filter_mode,
         )
     finally:
         emitter.logout_started(worker)
@@ -675,15 +686,6 @@ def _collect_request_context(request):
     target_ips = [ip for ip in target_ips if ip not in exclude_ips]
     ports = [p.strip() for p in request.ports.split(",") if p.strip()] if request.proto_enabled else None
 
-    if request.columns:
-        import config
-        for key, value in request.columns.items():
-            if key in config.COLUMNS_CONFIG:
-                config.COLUMNS_CONFIG[key] = value
-
-    import config
-    config.SMART_ACTION = request.smart_action.lower()
-
     return start_time, end_time, target_ips, exclude_ips, ports
 
 
@@ -695,6 +697,7 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
 
     split_mode = get_dynamic_split_mode()
     workers = request.workers or get_dynamic_workers()
+    analysis_config = AnalysisConfig.from_request(request, filter_mode=os.getenv("FILTER_MODE", "faz"))
     run_id, results_dir = _create_run_dir()
 
     all_files = []
@@ -721,9 +724,11 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                 exclude_ips=list(exclude_ips),
                 batch_size=get_dynamic_batch_size(),
                 ports=ports,
-                columns=request.columns,
+                columns=analysis_config.columns,
                 num_workers=workers,
-                aggregation=request.aggregation,
+                aggregation=analysis_config.aggregation,
+                smart_action=analysis_config.smart_action,
+                filter_mode=analysis_config.filter_mode,
                 progress=lambda message, ip=None: emitter.message(
                     message,
                     worker=WorkerRef(worker_id=ip or "policy", label=ip or "policy", slot_key=ip or "policy", direction="policy"),
@@ -760,8 +765,10 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                     batch_size=get_dynamic_batch_size(),
                     ports=ports,
                     policyid=policy_id,
-                    columns=request.columns,
-                    aggregation=request.aggregation,
+                    columns=analysis_config.columns,
+                    aggregation=analysis_config.aggregation,
+                    smart_action=analysis_config.smart_action,
+                    filter_mode=analysis_config.filter_mode,
                 )
                 if text is None:
                     raise RuntimeError("FAZ login failed")
@@ -803,8 +810,10 @@ def _run_policyid(request, emitter: SchedulerEmitter, cancel_check: CancelCheck,
                     batch_size=get_dynamic_batch_size(),
                     ports=ports,
                     policyid=policy_id,
-                    columns=request.columns,
-                    aggregation=request.aggregation,
+                    columns=analysis_config.columns,
+                    aggregation=analysis_config.aggregation,
+                    smart_action=analysis_config.smart_action,
+                    filter_mode=analysis_config.filter_mode,
                 )
                 if text is None:
                     raise RuntimeError("FAZ login failed")
@@ -844,6 +853,7 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
     target_groups = group_target_ips(target_ips, get_dynamic_target_group_size())
     workers = min(request.workers or get_dynamic_workers(), max(1, len(target_groups)))
+    analysis_config = AnalysisConfig.from_request(request, filter_mode=os.getenv("FILTER_MODE", "faz"))
     run_id, results_dir = _create_run_dir()
 
     direction_text = {direction: [] for direction in directions}
@@ -893,8 +903,10 @@ def _run_direction_time_split_by_ip(request, emitter: SchedulerEmitter, cancel_c
                         batch_size=get_dynamic_batch_size(),
                         ports=ports,
                         direction=direction,
-                        columns=request.columns,
-                        aggregation=request.aggregation,
+                        columns=analysis_config.columns,
+                        aggregation=analysis_config.aggregation,
+                        smart_action=analysis_config.smart_action,
+                        filter_mode=analysis_config.filter_mode,
                     ) or {}
 
                     with collect_lock:
@@ -957,6 +969,7 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
         )
 
     directions = ["inbound", "outbound"] if request.direction == "all" else [request.direction]
+    analysis_config = AnalysisConfig.from_request(request, filter_mode=os.getenv("FILTER_MODE", "faz"))
     run_id, results_dir = _create_run_dir()
     direction_text = {direction: [] for direction in directions}
     per_ip_results = {}
@@ -994,8 +1007,10 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                     batch_size=get_dynamic_batch_size(),
                     ports=ports,
                     direction=direction,
-                    columns=request.columns,
-                    aggregation=request.aggregation,
+                    columns=analysis_config.columns,
+                    aggregation=analysis_config.aggregation,
+                    smart_action=analysis_config.smart_action,
+                    filter_mode=analysis_config.filter_mode,
                 ) or {}
                 with collect_lock:
                     for (local_ip, dir_key), text in report_dict.items():
@@ -1040,8 +1055,10 @@ def _run_direction(request, emitter: SchedulerEmitter, cancel_check: CancelCheck
                         batch_size=get_dynamic_batch_size(),
                         ports=ports,
                         direction=direction,
-                        columns=request.columns,
-                        aggregation=request.aggregation,
+                        columns=analysis_config.columns,
+                        aggregation=analysis_config.aggregation,
+                        smart_action=analysis_config.smart_action,
+                        filter_mode=analysis_config.filter_mode,
                     ) or {}
                     for (local_ip, dir_key), text in report_dict.items():
                         if text.strip():
