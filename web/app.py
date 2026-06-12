@@ -4,16 +4,17 @@ import json
 import logging
 import asyncio
 import threading
+import ipaddress
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Р”РѕР±Р°РІР»СЏРµРј РєРѕСЂРµРЅСЊ РїСЂРѕРµРєС‚Р° РІ path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -78,30 +79,72 @@ for uv_logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "uvicorn.as
 # Pydantic РјРѕРґРµР»Рё
 # ========================
 
+MAX_WEB_WORKERS_LIMIT = int(os.getenv("MAX_WEB_WORKERS_LIMIT", "32"))
+MAX_TIME_HOURS_LIMIT = int(os.getenv("MAX_TIME_HOURS_LIMIT", "8760"))
+MAX_TIME_DAYS_LIMIT = int(os.getenv("MAX_TIME_DAYS_LIMIT", "365"))
+MAX_POLICY_IDS_LIMIT = int(os.getenv("MAX_POLICY_IDS_LIMIT", "100"))
+MAX_TARGETS_LIMIT = int(os.getenv("MAX_TARGETS_LIMIT", "1024"))
+MAX_EXPANDED_TARGETS_LIMIT = int(os.getenv("MAX_EXPANDED_TARGETS_LIMIT", "4096"))
+
+
 class TargetHost(BaseModel):
     ip: str
     mask: str = "/32"
 
+    @field_validator("ip")
+    @classmethod
+    def validate_ip_or_network(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            if "/" in value:
+                ipaddress.IPv4Network(value, strict=False)
+            else:
+                ipaddress.IPv4Address(value)
+        except ValueError as exc:
+            raise ValueError("target ip must be an IPv4 address or CIDR network") from exc
+        return value
+
+    @field_validator("mask")
+    @classmethod
+    def validate_mask(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith("/"):
+            raise ValueError("mask must use CIDR notation, e.g. /32")
+        try:
+            prefix = int(value[1:])
+        except ValueError as exc:
+            raise ValueError("mask must use CIDR notation, e.g. /32") from exc
+        if prefix < 0 or prefix > 32:
+            raise ValueError("mask prefix must be between /0 and /32")
+        return value
+
+    def expanded_count(self) -> int:
+        if "/" in self.ip:
+            return ipaddress.IPv4Network(self.ip, strict=False).num_addresses
+        if self.mask != "/32":
+            return ipaddress.IPv4Network(f"{self.ip}{self.mask}", strict=False).num_addresses
+        return 1
+
 
 class AnalysisRequest(BaseModel):
-    time_mode: str = "hours"
+    time_mode: Literal["hours", "days", "exact"] = "hours"
     time_value: int = 24
     start_time: Optional[str] = None
     end_time: Optional[str] = None
-    analysis_mode: str = "direction"
-    direction: str = "all"
+    analysis_mode: Literal["direction", "policyid"] = "direction"
+    direction: Literal["inbound", "outbound", "all"] = "all"
     exclude_internal: bool = True
     use_machines_file: bool = True
-    targets: List[TargetHost] = []
+    targets: List[TargetHost] = Field(default_factory=list)
     policyid: Optional[int] = None
     policyids: Optional[List[int]] = None
     proto_enabled: bool = False
     ports: str = ""
-    smart_action: str = "all"
+    smart_action: Literal["all", "deny", "all-accept"] = "all"
     columns: Optional[dict] = None
     aggregation: Optional[dict] = None
     workers: Optional[int] = None
-    output_format: str = "txt"  # txt | csv | both
+    output_format: Literal["txt", "csv", "both"] = "txt"  # txt | csv | both
 
     @field_validator("policyids", mode="before")
     @classmethod
@@ -124,22 +167,78 @@ class AnalysisRequest(BaseModel):
             return normalized or None
         raise ValueError("policyids must be a list of integers or comma-separated string")
 
+    @model_validator(mode="after")
+    def validate_limits(self):
+        if self.time_value <= 0:
+            raise ValueError("time_value must be positive")
+        if self.time_mode == "hours" and self.time_value > MAX_TIME_HOURS_LIMIT:
+            raise ValueError(f"time_value hours must be <= {MAX_TIME_HOURS_LIMIT}")
+        if self.time_mode == "days" and self.time_value > MAX_TIME_DAYS_LIMIT:
+            raise ValueError(f"time_value days must be <= {MAX_TIME_DAYS_LIMIT}")
+        if self.time_mode == "exact" and not (self.start_time and self.end_time):
+            raise ValueError("exact time mode requires start_time and end_time")
+
+        if self.workers is not None and not (1 <= self.workers <= MAX_WEB_WORKERS_LIMIT):
+            raise ValueError(f"workers must be between 1 and {MAX_WEB_WORKERS_LIMIT}")
+
+        if self.policyid is not None and self.policyid <= 0:
+            raise ValueError("policyid must be positive")
+        if self.policyids:
+            if len(self.policyids) > MAX_POLICY_IDS_LIMIT:
+                raise ValueError(f"policyids cannot contain more than {MAX_POLICY_IDS_LIMIT} items")
+            if any(policy_id <= 0 for policy_id in self.policyids):
+                raise ValueError("policyids must be positive")
+
+        if self.proto_enabled or self.ports.strip():
+            for raw_port in self.ports.split(","):
+                raw_port = raw_port.strip()
+                if not raw_port:
+                    continue
+                try:
+                    port = int(raw_port)
+                except ValueError as exc:
+                    raise ValueError("ports must be comma-separated integers") from exc
+                if port < 1 or port > 65535:
+                    raise ValueError("ports must be between 1 and 65535")
+
+        if not self.use_machines_file:
+            if len(self.targets) > MAX_TARGETS_LIMIT:
+                raise ValueError(f"targets cannot contain more than {MAX_TARGETS_LIMIT} entries")
+            expanded_targets = sum(target.expanded_count() for target in self.targets)
+            if expanded_targets > MAX_EXPANDED_TARGETS_LIMIT:
+                raise ValueError(
+                    f"expanded targets cannot exceed {MAX_EXPANDED_TARGETS_LIMIT} IP addresses"
+                )
+        return self
+
 
 class SettingsUpdate(BaseModel):
     faz_url: Optional[str] = None
     faz_username: Optional[str] = None
     faz_password: Optional[str] = None
     batch_size: Optional[int] = None
-    smart_action: Optional[str] = None
+    smart_action: Optional[Literal["all", "deny", "all-accept"]] = None
     results_dir: Optional[str] = None
     max_task_hours: Optional[int] = None
     max_matched_logs: Optional[int] = None
     max_workers: Optional[int] = None
-    session_split_mode: Optional[str] = None  # "ip" или "time"
+    session_split_mode: Optional[Literal["ip", "time"]] = None
     disable_reverse_dns: Optional[bool] = None
     columns: Optional[dict] = None
     aggregation: Optional[dict] = None
-    output_format: Optional[str] = None
+    output_format: Optional[Literal["txt", "csv", "both"]] = None
+
+    @model_validator(mode="after")
+    def validate_settings_limits(self):
+        if self.batch_size is not None and not (1 <= self.batch_size <= 100000):
+            raise ValueError("batch_size must be between 1 and 100000")
+        if self.max_task_hours is not None and not (1 <= self.max_task_hours <= MAX_TIME_HOURS_LIMIT):
+            raise ValueError(f"max_task_hours must be between 1 and {MAX_TIME_HOURS_LIMIT}")
+        if self.max_matched_logs is not None and not (0 <= self.max_matched_logs <= 10000000):
+            raise ValueError("max_matched_logs must be between 0 and 10000000")
+        if self.max_workers is not None and not (1 <= self.max_workers <= MAX_WEB_WORKERS_LIMIT):
+            raise ValueError(f"max_workers must be between 1 and {MAX_WEB_WORKERS_LIMIT}")
+        return self
 
 
 def parse_history() -> List[dict]:
@@ -555,9 +654,7 @@ async def update_settings(data: SettingsUpdate):
     if data.max_workers is not None:
         updates["MAX_WORKERS"] = str(data.max_workers)
     if data.session_split_mode is not None:
-        val = data.session_split_mode.strip().lower()
-        if val in ("ip", "time"):
-            updates["SESSION_SPLIT_MODE"] = val
+        updates["SESSION_SPLIT_MODE"] = data.session_split_mode
     if data.disable_reverse_dns is not None:
         updates["DISABLE_REVERSE_DNS"] = str(bool(data.disable_reverse_dns)).lower()
         clear_dns_cache = True

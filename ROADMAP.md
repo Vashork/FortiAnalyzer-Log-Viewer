@@ -54,18 +54,44 @@
 
 ### 1.2 Server-side validation and limits
 
+Статус: DONE — 2026-06-12
+
+Реализовано:
+- `AnalysisRequest` получил `Literal`-ограничения для `time_mode`, `analysis_mode`, `direction`, `smart_action`, `output_format`;
+- `SettingsUpdate` получил `Literal`-ограничения для `smart_action`, `session_split_mode`, `output_format`;
+- добавлены server-side limits:
+  - `MAX_WEB_WORKERS_LIMIT=32`;
+  - `MAX_TIME_HOURS_LIMIT=8760`;
+  - `MAX_TIME_DAYS_LIMIT=365`;
+  - `MAX_POLICY_IDS_LIMIT=100`;
+  - `MAX_TARGETS_LIMIT=1024`;
+  - `MAX_EXPANDED_TARGETS_LIMIT=4096`;
+- ports валидируются как comma-separated integers `1..65535`;
+- Web targets не могут случайно развернуть огромную сеть вроде `/8`;
+- CLI `load_machines()` / `parse_ip_range()` тоже защищены от слишком больших CIDR/ranges до фактического расширения;
+- `.env.example` документирует новые validation limits.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_web_validation.py tests/test_network_limits.py -q` → 8 passed;
+- `PYTHONPATH=. pytest -q` → 26 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
+Контекст по Web auth:
+- Web API authentication пока не реализуется по решению владельца;
+- сервер уже запускается на `127.0.0.1:8500`, внешний доступ планируется через nginx/reverse proxy.
+
 Проблема: workers, time range, ports, CIDR/ranges и policyids почти не ограничены сервером.
 
 Что сделать:
-- добавить Pydantic `Literal`/validators для режимов;
-- ограничить `workers`, `time_value`, `batch_size`, число `policyids`;
-- валидировать ports как int 1..65535;
-- добавить лимит `MAX_TARGET_IPS` / `MAX_EXPANDED_TARGETS`;
-- не позволять случайно развернуть огромную сеть вроде `/8`.
+- [x] добавить Pydantic `Literal`/validators для режимов;
+- [x] ограничить `workers`, `time_value`, `batch_size`, число `policyids`;
+- [x] валидировать ports как int 1..65535;
+- [x] добавить лимит `MAX_TARGET_IPS` / `MAX_EXPANDED_TARGETS`;
+- [x] не позволять случайно развернуть огромную сеть вроде `/8`.
 
 Критерии готовности:
-- плохие входные данные возвращают HTTP 422/400 с понятной ошибкой;
-- CLI также получает защиту от слишком больших CIDR/ranges.
+- [x] плохие входные данные возвращают HTTP 422/400 с понятной ошибкой;
+- [x] CLI также получает защиту от слишком больших CIDR/ranges.
 
 ### 1.3 Real concurrency limiter for analysis jobs
 

@@ -5,6 +5,8 @@ import os
 
 from config import get_dynamic_reverse_dns_enabled
 
+MAX_EXPANDED_TARGETS_LIMIT = int(os.getenv("MAX_EXPANDED_TARGETS_LIMIT", "4096"))
+
 # Кэш для разрешения имён
 _hostname_cache: Dict[str, str] = {}
 _last_reverse_dns_enabled: Optional[bool] = None
@@ -48,14 +50,27 @@ def resolve_hostname(ip: str) -> str:
 #  CIDR / Ranges
 # -----------------------------
 def parse_ip_range(spec: str) -> List[str]:
-    """Преобразует CIDR или диапазон в список IP-адресов."""
+    """Преобразует CIDR или диапазон в список IP-адресов с защитой от огромного расширения."""
     spec = spec.strip()
     if "/" in spec:
-        return [str(ip) for ip in ipaddress.IPv4Network(spec, strict=False)]
+        network = ipaddress.IPv4Network(spec, strict=False)
+        if network.num_addresses > MAX_EXPANDED_TARGETS_LIMIT:
+            raise ValueError(
+                f"CIDR {spec} expands to {network.num_addresses} IPs; "
+                f"limit is {MAX_EXPANDED_TARGETS_LIMIT}"
+            )
+        return [str(ip) for ip in network]
     elif "-" in spec:
         start_ip, end_ip = spec.split("-", 1)
         start = ipaddress.IPv4Address(start_ip.strip())
         end = ipaddress.IPv4Address(end_ip.strip())
+        if int(end) < int(start):
+            raise ValueError(f"Invalid IP range {spec}: end is before start")
+        count = int(end) - int(start) + 1
+        if count > MAX_EXPANDED_TARGETS_LIMIT:
+            raise ValueError(
+                f"Range {spec} expands to {count} IPs; limit is {MAX_EXPANDED_TARGETS_LIMIT}"
+            )
         return [str(ipaddress.IPv4Address(i)) for i in range(int(start), int(end) + 1)]
     else:
         return [spec]  # single IP
