@@ -18,7 +18,6 @@ from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs, split_tim
 from analyzer.time_range_analyzer import analyze_policyid_logs_time_split
 from client.faz_client import FortiAnalyzerClient
 from config import (
-    EMPTY_BATCH_LIMIT,
     INTERNAL_IPS_FILE,
     MACHINES_FILE,
     get_dynamic_batch_size,
@@ -440,170 +439,117 @@ def _make_progress_callback(emitter: SchedulerEmitter, worker: WorkerRef):
     return progress
 
 
-def _patch_faz_client_for_events(client: FortiAnalyzerClient, emitter: SchedulerEmitter, worker: WorkerRef,
-                                 cancel_check: CancelCheck):
-    original_create = client.create_search_task
-    original_fetch = client.fetch_logs
+def _make_client_event_callback(emitter: SchedulerEmitter, worker: WorkerRef) -> Callable[[str, dict], None]:
+    """Map FortiAnalyzerClient lifecycle hooks into Web scheduler events."""
 
-    def _drop_active_task(task_id):
-        if task_id in client._active_tasks:
-            client._active_tasks.remove(task_id)
+    def handle(event_type: str, payload: dict):
+        if event_type == "search_task_created":
+            emitter.message(f"Created search task: {payload.get('task_id')}", worker=worker, stage="search")
+            return
 
-    def patched_create(filter_str, start, end):
-        if cancel_check and cancel_check():
-            return None
-        result = original_create(filter_str, start, end)
-        if result:
-            emitter.message(f"Created search task: {result}", worker=worker, stage="search")
-        return result
+        if event_type == "wait_started":
+            emitter.message("Waiting for FAZ to process search task...", worker=worker, stage="wait")
+            return
 
-    def patched_wait(task_id, max_wait=300):
-        start_ts = time.time()
-        last_progress = -1
-        last_poll_ts = 0
-        poll_interval = 1
+        if event_type == "wait_progress":
+            emitter.message(
+                f"Progress: {payload.get('progress')}% (matched: {payload.get('matched_logs')})",
+                worker=worker,
+                stage="wait",
+            )
+            return
 
-        emitter.message("Waiting for FAZ to process search task...", worker=worker, stage="wait")
+        if event_type == "task_completed":
+            emitter.message(
+                f"Task completed. Found {payload.get('matched_logs')} logs",
+                worker=worker,
+                stage="wait",
+            )
+            return
 
-        while time.time() - start_ts < max_wait:
-            if cancel_check and cancel_check():
+        if event_type == "task_failed":
+            emitter.message(
+                f"Task failed with status code: {payload.get('status_code')}",
+                worker=worker,
+                stage="error",
+            )
+            return
+
+        if event_type == "task_timeout":
+            emitter.message("Task did not complete within allowed time", worker=worker, stage="warn")
+            return
+
+        if event_type == "status_check_error":
+            emitter.message(
+                f"Status check error, retrying: {payload.get('error')}",
+                worker=worker,
+                stage="warn",
+            )
+            return
+
+        if event_type == "cancelled":
+            stage = payload.get("stage") or "cancel"
+            if stage == "fetch":
+                emitter.message(
+                    f"Cancelled (fetched {payload.get('fetched', 0)}/{payload.get('total', 0)})",
+                    worker=worker,
+                    stage="cancel",
+                )
+            else:
                 emitter.message("Cancelled by user", worker=worker, stage="cancel")
-                client.cancel_search_task(task_id)
-                _drop_active_task(task_id)
-                return False, 0
+            return
 
-            now = time.time()
-            if now - last_poll_ts < poll_interval:
-                time.sleep(0.3)
-                continue
-            last_poll_ts = now
+        if event_type == "fetch_retry":
+            emitter.message(
+                (
+                    f"Fetch error at offset {payload.get('offset')}, retry "
+                    f"{payload.get('retry')}/{payload.get('retry_limit')}: {payload.get('error')}"
+                ),
+                worker=worker,
+                stage="warn",
+            )
+            return
 
-            payload = {
-                "id": "123456789",
-                "jsonrpc": "2.0",
-                "method": "get",
-                "params": [{"apiver": 3, "url": f"/logview/adom/root/logsearch/count/{task_id}"}],
-                "session": client.session,
-            }
-            try:
-                result = client._post(payload)
-                raw = client._normalize_result(result)
-                status_code = raw.get("status", {}).get("code", -1)
-                matched = raw.get("matched-logs", 0)
-                progress_value = raw.get("progress-percent", 0)
+        if event_type == "fetch_aborted":
+            emitter.message(f"Fetch aborted at offset {payload.get('offset')}", worker=worker, stage="error")
+            return
 
-                if progress_value != last_progress:
-                    emitter.message(f"Progress: {progress_value}% (matched: {matched})", worker=worker, stage="wait")
-                    last_progress = progress_value
+        if event_type == "empty_batch_retry":
+            emitter.message(
+                (
+                    f"Empty batch at offset {payload.get('offset')}, retry "
+                    f"{payload.get('retry')}/{payload.get('retry_limit')}"
+                ),
+                worker=worker,
+                stage="warn",
+            )
+            return
 
-                if status_code == 0 and progress_value == 100:
-                    _drop_active_task(task_id)
-                    emitter.message(f"Task completed. Found {matched} logs", worker=worker, stage="wait")
-                    return True, matched
+        if event_type == "empty_batch_aborted":
+            emitter.message(f"No data at offset {payload.get('offset')} after retries", worker=worker, stage="warn")
+            return
 
-                if status_code in (0, 1):
-                    continue
+        if event_type == "incomplete_batch_retry":
+            emitter.message(
+                (
+                    f"Incomplete batch at offset {payload.get('offset')}: got {payload.get('fetched_batch')}, "
+                    f"retry {payload.get('retry')}/{payload.get('retry_limit')}"
+                ),
+                worker=worker,
+                stage="warn",
+            )
+            return
 
-                emitter.message(f"Task failed with status code: {status_code}", worker=worker, stage="error")
-                _drop_active_task(task_id)
-                return False, 0
-            except Exception as exc:
-                emitter.message(f"Status check error, retrying: {exc}", worker=worker, stage="warn")
-                time.sleep(3)
+        if event_type == "fetch_progress":
+            emitter.fetch_progress(
+                worker,
+                int(payload.get("fetched", 0)),
+                int(payload.get("total", 0)),
+                int(payload.get("pct", 0)),
+            )
+            return
 
-        emitter.message("Task did not complete within allowed time", worker=worker, stage="warn")
-        _drop_active_task(task_id)
-        return False, 0
-
-    def patched_iter_fetch(task_id, total, batch=100):
-        offset = 0
-        incomplete_retry_limit = 3
-
-        while offset < total:
-            if cancel_check and cancel_check():
-                emitter.message(f"Cancelled (fetched {offset}/{total})", worker=worker, stage="cancel")
-                client.cancel_search_task(task_id)
-                _drop_active_task(task_id)
-                return
-
-            payload = {
-                "id": "123456789",
-                "jsonrpc": "2.0",
-                "method": "get",
-                "params": [{"apiver": 3, "limit": batch, "offset": offset, "url": f"/logview/adom/root/logsearch/{task_id}"}],
-                "session": client.session,
-            }
-
-            empty_retry = 0
-            incomplete_retry = 0
-            while True:
-                if cancel_check and cancel_check():
-                    emitter.message(f"Cancelled (fetched {offset}/{total})", worker=worker, stage="cancel")
-                    client.cancel_search_task(task_id)
-                    _drop_active_task(task_id)
-                    return
-
-                try:
-                    resp = client._post(payload)
-                    data = client._normalize_result(resp).get("data", [])
-                except Exception as exc:
-                    empty_retry += 1
-                    if empty_retry <= EMPTY_BATCH_LIMIT:
-                        emitter.message(
-                            f"Fetch error at offset {offset}, retry {empty_retry}/{EMPTY_BATCH_LIMIT}: {exc}",
-                            worker=worker,
-                            stage="warn",
-                        )
-                        time.sleep(3)
-                        continue
-                    emitter.message(f"Fetch aborted at offset {offset}: {exc}", worker=worker, stage="error")
-                    _drop_active_task(task_id)
-                    return
-
-                if not data:
-                    empty_retry += 1
-                    if empty_retry <= EMPTY_BATCH_LIMIT:
-                        emitter.message(
-                            f"Empty batch at offset {offset}, retry {empty_retry}/{EMPTY_BATCH_LIMIT}",
-                            worker=worker,
-                            stage="warn",
-                        )
-                        time.sleep(3)
-                        continue
-                    emitter.message(f"No data at offset {offset} after retries", worker=worker, stage="warn")
-                    _drop_active_task(task_id)
-                    return
-
-                if len(data) < batch and (total - offset) > len(data):
-                    incomplete_retry += 1
-                    if incomplete_retry <= incomplete_retry_limit:
-                        emitter.message(
-                            f"Incomplete batch at offset {offset}: got {len(data)}, retry {incomplete_retry}/{incomplete_retry_limit}",
-                            worker=worker,
-                            stage="warn",
-                        )
-                        time.sleep(3)
-                        continue
-
-                offset += len(data)
-                pct = int(offset / total * 100) if total else 100
-                emitter.fetch_progress(worker, offset, total, pct)
-                yield data
-                break
-
-        _drop_active_task(task_id)
-
-    def patched_fetch(task_id, total, batch=100):
-        all_logs = []
-        for logs_batch in patched_iter_fetch(task_id, total, batch):
-            all_logs.extend(logs_batch)
-        return all_logs
-
-    client.create_search_task = patched_create
-    client.wait_for_task_completion = patched_wait
-    client.iter_fetch_logs = patched_iter_fetch
-    client.fetch_logs = patched_fetch
-
+    return handle
 
 def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: CancelCheck, *,
                     target_ips, exclude_ips, start_time, end_time, batch_size, ports,
@@ -615,13 +561,15 @@ def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: 
         aggregation = analysis_config.aggregation
         smart_action = analysis_config.smart_action
         filter_mode = analysis_config.filter_mode
-    client = FortiAnalyzerClient.from_env(cancel_check=cancel_check)
+    client = FortiAnalyzerClient.from_env(
+        cancel_check=cancel_check,
+        event_callback=_make_client_event_callback(emitter, worker),
+    )
     if not client.login():
         return None
 
     progress = _make_progress_callback(emitter, worker)
     try:
-        _patch_faz_client_for_events(client, emitter, worker, cancel_check)
         if policyid is not None:
             return analyze_policyid_logs(
                 client=client,

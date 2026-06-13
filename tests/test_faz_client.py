@@ -124,6 +124,86 @@ class FortiAnalyzerClientSessionTests(unittest.TestCase):
         client.http.post.assert_called_once()
 
 
+class FortiAnalyzerClientEventHookTests(unittest.TestCase):
+    def test_create_search_task_emits_created_event(self):
+        events = []
+        client = FortiAnalyzerClient(
+            "https://faz.example/jsonrpc",
+            "admin",
+            "secret",
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+        client.session = "sid"
+        client._post = Mock(return_value={"result": {"tid": 42}})
+
+        task_id = client.create_search_task("srcip=10.0.0.1", "2026-06-01 00:00:00", "2026-06-01 01:00:00")
+
+        self.assertEqual(task_id, 42)
+        self.assertIn(42, client._active_tasks)
+        self.assertEqual(events, [("search_task_created", {"task_id": 42})])
+
+    def test_wait_for_task_completion_emits_wait_lifecycle_events_and_drops_active_task(self):
+        events = []
+        client = FortiAnalyzerClient(
+            "https://faz.example/jsonrpc",
+            "admin",
+            "secret",
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+        client.session = "sid"
+        client._active_tasks.append(42)
+        client._post = Mock(return_value={
+            "result": {
+                "status": {"code": 0},
+                "matched-logs": 7,
+                "progress-percent": 100,
+            }
+        })
+
+        ok, matched = client.wait_for_task_completion(42)
+
+        self.assertTrue(ok)
+        self.assertEqual(matched, 7)
+        self.assertNotIn(42, client._active_tasks)
+        self.assertEqual(events[0], ("wait_started", {"task_id": 42}))
+        self.assertIn(("wait_progress", {"task_id": 42, "progress": 100, "matched_logs": 7}), events)
+        self.assertIn(("task_completed", {"task_id": 42, "matched_logs": 7}), events)
+
+    def test_iter_fetch_logs_emits_fetch_progress_and_drops_active_task(self):
+        events = []
+        client = FortiAnalyzerClient(
+            "https://faz.example/jsonrpc",
+            "admin",
+            "secret",
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+        client.session = "sid"
+        client._active_tasks.append(42)
+        batch = [{"id": 1}, {"id": 2}]
+        client._post = Mock(return_value={"result": {"data": batch}})
+
+        fetched = list(client.iter_fetch_logs(42, total_logs=2, batch_size=100))
+
+        self.assertEqual(fetched, [batch])
+        self.assertNotIn(42, client._active_tasks)
+        self.assertEqual(events, [
+            ("fetch_progress", {"task_id": 42, "fetched": 2, "total": 2, "pct": 100})
+        ])
+
+    def test_from_env_accepts_event_callback(self):
+        callback = Mock()
+        env = {
+            "FORTIANALYZER_URL": "https://faz.example/jsonrpc",
+            "FORTIANALYZER_USERNAME": "admin",
+            "FORTIANALYZER_PASSWORD": "secret",
+        }
+
+        with patch.dict("os.environ", env, clear=False):
+            client = FortiAnalyzerClient.from_env(event_callback=callback)
+
+        self.assertIs(client.event_callback, callback)
+
+
 class FortiAnalyzerClientEnvFactoryTests(unittest.TestCase):
     def test_from_env_reads_tls_and_pool_settings(self):
         env = {

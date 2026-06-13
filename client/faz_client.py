@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Iterator, Optional, List, Dict, Tuple, Union
+from typing import Callable, Iterator, Optional, List, Dict, Tuple, Union
 
 import requests
 import urllib3
@@ -48,6 +48,7 @@ class FortiAnalyzerClient:
         read_timeout: int = 30,
         retry_attempts: int = 3,
         retry_backoff_seconds: int = 1,
+        event_callback: Optional[Callable[[str, Dict], None]] = None,
     ):
         self.url = url
         self.username = username
@@ -65,6 +66,7 @@ class FortiAnalyzerClient:
         self.read_timeout = read_timeout
         self.retry_attempts = max(1, retry_attempts)
         self.retry_backoff_seconds = max(0, retry_backoff_seconds)
+        self.event_callback = event_callback
         self.http = requests.Session()
         adapter = HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize)
         self.http.mount("https://", adapter)
@@ -74,7 +76,7 @@ class FortiAnalyzerClient:
             print("⚠ FortiAnalyzer TLS verification is disabled (FORTIANALYZER_TLS_VERIFY=false)")
 
     @classmethod
-    def from_env(cls, cancel_check=None) -> "FortiAnalyzerClient":
+    def from_env(cls, cancel_check=None, event_callback: Optional[Callable[[str, Dict], None]] = None) -> "FortiAnalyzerClient":
         """Create a client from environment variables with safe compatibility defaults."""
         verify_tls = _env_bool("FORTIANALYZER_TLS_VERIFY", False)
         return cls(
@@ -90,7 +92,24 @@ class FortiAnalyzerClient:
             read_timeout=_env_int("FORTIANALYZER_READ_TIMEOUT", 30),
             retry_attempts=_env_int("FORTIANALYZER_RETRY_ATTEMPTS", 3),
             retry_backoff_seconds=_env_int("FORTIANALYZER_RETRY_BACKOFF_SECONDS", 1),
+            event_callback=event_callback,
         )
+
+    def set_event_callback(self, callback: Optional[Callable[[str, Dict], None]]) -> None:
+        """Attach an optional event hook used by Web orchestration without monkey-patching methods."""
+        self.event_callback = callback
+
+    def _emit_event(self, event_type: str, **payload) -> None:
+        if not self.event_callback:
+            return
+        try:
+            self.event_callback(event_type, payload)
+        except Exception as exc:
+            print(f"⚠ FortiAnalyzer client event callback failed: {exc}")
+
+    def _drop_active_task(self, task_id: int) -> None:
+        if task_id in self._active_tasks:
+            self._active_tasks.remove(task_id)
 
     def transport_kwargs(self) -> Dict:
         """Return transport settings for worker clients spawned from this client."""
@@ -240,6 +259,7 @@ class FortiAnalyzerClient:
                 tid = raw["tid"]
                 self._active_tasks.append(tid)  # трекаем созданный task
                 print(f"✓ Created search task with ID: {tid}")
+                self._emit_event("search_task_created", task_id=tid)
                 return tid
 
             print(f"✗ Failed to create search task: {result}")
@@ -279,15 +299,16 @@ class FortiAnalyzerClient:
     def wait_for_task_completion(self, task_id: int, max_wait_seconds: int = 300) -> Tuple[bool, int]:
         start_ts = time.time()
         last_progress = -1
+        self._emit_event("wait_started", task_id=task_id)
 
         try:
             while time.time() - start_ts < max_wait_seconds:
                 # Проверяем отмену
                 if self.cancel_check and self.cancel_check():
                     print(f"  ⏹ Cancelled by user (wait_for_task_completion)")
+                    self._emit_event("cancelled", task_id=task_id, stage="wait")
                     self.cancel_search_task(task_id)  # отменяем task на сервере
-                    if task_id in self._active_tasks:
-                        self._active_tasks.remove(task_id)
+                    self._drop_active_task(task_id)
                     return False, 0
 
                 payload = {
@@ -314,10 +335,13 @@ class FortiAnalyzerClient:
 
                     if progress != last_progress:
                         print(f"Progress: {progress}%")
+                        self._emit_event("wait_progress", task_id=task_id, progress=progress, matched_logs=matched_logs)
                         last_progress = progress
 
                     if status_code == 0 and progress == 100:
                         print(f"✓ Task completed successfully. Found {matched_logs} matching logs")
+                        self._drop_active_task(task_id)
+                        self._emit_event("task_completed", task_id=task_id, matched_logs=matched_logs)
                         return True, matched_logs
 
                     if status_code in (0, 1):
@@ -329,12 +353,15 @@ class FortiAnalyzerClient:
                         continue
 
                     print(f"✗ Task failed with status code: {status_code}")
+                    self._drop_active_task(task_id)
+                    self._emit_event("task_failed", task_id=task_id, status_code=status_code)
                     return False, 0
 
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
                     print(f"✗ Error checking task status: {e}")
+                    self._emit_event("status_check_error", task_id=task_id, error=str(e))
                     time.sleep(5)
 
         except KeyboardInterrupt:
@@ -342,6 +369,8 @@ class FortiAnalyzerClient:
             return False, 0
 
         print("✗ Task did not complete within allowed time")
+        self._drop_active_task(task_id)
+        self._emit_event("task_timeout", task_id=task_id, max_wait_seconds=max_wait_seconds)
         return False, 0
 
     # ==========================
@@ -378,9 +407,9 @@ class FortiAnalyzerClient:
                     # Проверяем отмену перед каждым запросом
                     if self.cancel_check and self.cancel_check():
                         print(f"  ⏹ Cancelled by user (fetch_logs at offset {offset})")
+                        self._emit_event("cancelled", task_id=task_id, stage="fetch", fetched=offset, total=total_logs)
                         self.cancel_search_task(task_id)  # отменяем task на сервере
-                        if task_id in self._active_tasks:
-                            self._active_tasks.remove(task_id)
+                        self._drop_active_task(task_id)
                         return
 
                     try:
@@ -391,30 +420,39 @@ class FortiAnalyzerClient:
                         empty_retry += 1
                         if empty_retry <= EMPTY_BATCH_LIMIT:
                             print(f"✗ Error at offset {offset}, retrying ({empty_retry}/{EMPTY_BATCH_LIMIT}): {e}")
+                            self._emit_event("fetch_retry", task_id=task_id, offset=offset, retry=empty_retry, retry_limit=EMPTY_BATCH_LIMIT, error=str(e))
                             time.sleep(3)
                             continue
                         print(f"✗ Max retries reached at offset {offset}")
+                        self._drop_active_task(task_id)
+                        self._emit_event("fetch_aborted", task_id=task_id, offset=offset)
                         return
 
                     if not data:
                         empty_retry += 1
                         if empty_retry <= EMPTY_BATCH_LIMIT:
                             print(f"⚠️ Empty data received at offset {offset}, retrying ({empty_retry}/{EMPTY_BATCH_LIMIT})...")
+                            self._emit_event("empty_batch_retry", task_id=task_id, offset=offset, retry=empty_retry, retry_limit=EMPTY_BATCH_LIMIT)
                             time.sleep(3)
                             continue
                         print(f"⚠️ No data at offset {offset} after {EMPTY_BATCH_LIMIT} retries.")
+                        self._drop_active_task(task_id)
+                        self._emit_event("empty_batch_aborted", task_id=task_id, offset=offset)
                         return
 
                     if len(data) < batch_size and (total_logs - offset) > len(data):
                         incomplete_retry += 1
                         if incomplete_retry <= MAX_INCOMPLETE_RETRIES:
                             print(f"⚠️ Incomplete batch at offset {offset}: got {len(data)}, retrying ({incomplete_retry}/{MAX_INCOMPLETE_RETRIES})...")
+                            self._emit_event("incomplete_batch_retry", task_id=task_id, offset=offset, fetched_batch=len(data), retry=incomplete_retry, retry_limit=MAX_INCOMPLETE_RETRIES)
                             time.sleep(3)
                             continue
                         print(f"⚠️ Incomplete batch persists, accepting partial {len(data)}")
 
                     offset += len(data)
                     print(f"📥 Fetched {offset}/{total_logs} logs")
+                    pct = int(offset / total_logs * 100) if total_logs else 100
+                    self._emit_event("fetch_progress", task_id=task_id, fetched=offset, total=total_logs, pct=pct)
                     yield data
                     break
 
@@ -425,6 +463,8 @@ class FortiAnalyzerClient:
 
         if offset != total_logs:
             print(f"⚠️ Warning: Expected {total_logs} logs but got {offset}")
+        else:
+            self._drop_active_task(task_id)
 
     def fetch_logs(self, task_id: int, total_logs: int, batch_size: int = 100) -> List[Dict]:
         all_logs: List[Dict] = []

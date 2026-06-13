@@ -494,11 +494,26 @@
 
 ### 5.2 Remove client monkey-patching
 
-Проблема: `_patch_faz_client_for_events()` подменяет методы клиента.
+Статус: DONE — 2026-06-13
+
+Проблема: `_patch_faz_client_for_events()` подменял методы клиента.
+
+Реализовано:
+- `FortiAnalyzerClient` получил совместимый optional `event_callback` / `set_event_callback()` hook;
+- lifecycle-события клиента (`search_task_created`, `wait_started`, `wait_progress`, `task_completed`, `task_failed`, `task_timeout`, fetch retry/progress/cancel events) эмитятся из обычных методов клиента;
+- Web scheduler теперь использует `_make_client_event_callback()` как adapter FortiAnalyzerClient events → SSE/progress events;
+- runtime monkey-patching методов `create_search_task`, `wait_for_task_completion`, `iter_fetch_logs`, `fetch_logs` удален;
+- regression tests покрывают create/wait/fetch event hooks и `from_env(event_callback=...)`.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_faz_client.py tests/test_progress_throttling.py tests/test_log_analyzer.py -q` → 26 passed;
+- `PYTHONPATH=. pytest -q` → 69 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK;
+- grep по `_patch_faz_client_for_events|client\\.create_search_task\\s*=|client\\.wait_for_task_completion\\s*=|client\\.iter_fetch_logs\\s*=|client\\.fetch_logs\\s*=` → 0 matches.
 
 Что сделать:
-- добавить event callbacks/hooks в `FortiAnalyzerClient`;
-- либо сделать wrapper class.
+- [x] добавить event callbacks/hooks в `FortiAnalyzerClient`;
+- [x] либо сделать wrapper class.
 
 ### 5.3 Unified CLI/Web analysis service
 
