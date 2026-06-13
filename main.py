@@ -1,11 +1,10 @@
 import sys
 import argparse
-from pathlib import Path
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import os
 
+from analyzer.analysis_service import AnalysisRunContext, AnalysisService, AnalysisServiceConfig
 from config import (
     get_results_dir_path,
     BATCH_SIZE,
@@ -14,22 +13,8 @@ from config import (
     DEFAULT_TIME_RANGE_HOURS,
     get_dynamic_reverse_dns_enabled,
     validate_config,
-    reload_env,
 )
-
 from utils.network import configure_reverse_dns, load_machines, load_ports
-from utils.batching import group_target_ips
-from client.faz_client import FortiAnalyzerClient
-from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs
-
-
-def _create_faz_client() -> FortiAnalyzerClient:
-    """Создать клиент FAZ из переменных окружения."""
-    return FortiAnalyzerClient.from_env()
-
-
-from utils.output import save_results
-
 
 
 # ----------------------------------------------------
@@ -51,30 +36,6 @@ def _append_history(text: str, start_time: str, end_time: str, cmd: str, filenam
     with open(history_path, "a", encoding="utf-8") as f:
         f.write(header)
         f.write(text.rstrip() + "\n")
-
-
-# ----------------------------------------------------
-# WORKER — IP GROUP
-# ----------------------------------------------------
-def process_ip_group(ip_group, direction, start_time, end_time, exclude_ips, ports):
-    client = _create_faz_client()
-
-    if not client.login():
-        raise RuntimeError("FAZ login failed")
-
-    try:
-        return analyze_logs(
-            client=client,
-            target_ips=ip_group,
-            direction=direction,
-            start_time=start_time,
-            end_time=end_time,
-            exclude_ips=exclude_ips,
-            batch_size=BATCH_SIZE,
-            ports=ports,
-        )
-    finally:
-        client.logout()
 
 
 # ----------------------------------------------------
@@ -121,87 +82,46 @@ def main():
     results_dir = get_results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # ================= POLICY MODE =================
-    if args.policyid is not None:
-        client = _create_faz_client()
+    service = AnalysisService(
+        config=AnalysisServiceConfig(
+            batch_size=BATCH_SIZE,
+            max_workers=args.workers or MAX_WORKERS,
+            target_group_size=TARGET_GROUP_SIZE,
+        ),
+        progress=lambda message: print(f"🎯 {message}"),
+    )
+    context = AnalysisRunContext(
+        start_time=start_time,
+        end_time=end_time,
+        target_ips=target_ips,
+        exclude_ips=exclude_ips,
+        ports=ports,
+        cmd=cmd,
+    )
 
-        if not client.login():
-            print("❌ FAZ login failed", file=sys.stderr)
-            sys.exit(1)
-
-        try:
-            text = analyze_policyid_logs(
-                client=client,
-                target_ips=target_ips,
+    try:
+        if args.policyid is not None:
+            result = service.run_policyid(
+                context=context,
                 policyid=args.policyid,
-                start_time=start_time,
-                end_time=end_time,
-                exclude_ips=exclude_ips,
-                batch_size=BATCH_SIZE,
-                ports=ports,
+                results_dir=results_dir,
+                history_callback=_append_history,
             )
-        finally:
-            client.logout()
-
-        if not text.strip():
-            text = "NO DATA\n"
-
-        outfile = results_dir / f"policy_{args.policyid}.txt"
-        save_results(text, outfile)
-        _append_history(text, start_time, end_time, cmd, outfile.name)
-
-        print(f"💾 Saved: {outfile}")
-        return
-
-    # ================= DIRECTION MODE =================
-    directions = ["inbound", "outbound"] if args.direction == "all" else [args.direction]
-    workers = args.workers or MAX_WORKERS
-
-    # аккумулируем вывод строго по направлению
-    direction_text = {d: [] for d in directions}
-    target_groups = group_target_ips(target_ips, TARGET_GROUP_SIZE)
-    print(f"🎯 Target groups: {len(target_groups)} (TARGET_GROUP_SIZE={max(1, TARGET_GROUP_SIZE)})")
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = []
-
-        for direction in directions:
-            for ip_group in target_groups:
-                futures.append(
-                    ex.submit(
-                        process_ip_group,
-                        ip_group,
-                        direction,
-                        start_time,
-                        end_time,
-                        exclude_ips,
-                        ports,
-                    )
-                )
-
-        for f in as_completed(futures):
-            try:
-                reports = f.result() or {}
-            except Exception as e:
-                print(f"❌ Worker error: {e}", file=sys.stderr)
-                reports = {}
-            for (_, direction), text in reports.items():
-                if text.strip():
-                    direction_text[direction].append(text)
-
-    # ---------------- SAVE FILES ----------------
-    for direction in directions:
-        outfile = results_dir / f"{direction}.txt"
-
-        if direction_text[direction]:
-            final_text = "\n\n".join(direction_text[direction])
         else:
-            final_text = "NO DATA\n"
+            directions = ["inbound", "outbound"] if args.direction == "all" else [args.direction]
+            result = service.run_direction(
+                context=context,
+                directions=directions,
+                results_dir=results_dir,
+                history_callback=_append_history,
+                workers=args.workers or MAX_WORKERS,
+            )
+    except RuntimeError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(1)
 
-        save_results(final_text, outfile)
-        _append_history(final_text, start_time, end_time, cmd, outfile.name)
-
-        print(f"💾 Saved: {outfile}")
+    for saved in result.files:
+        print(f"💾 Saved: {saved.path}")
 
 
 if __name__ == "__main__":

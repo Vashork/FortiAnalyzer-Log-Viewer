@@ -203,12 +203,14 @@ class FortiAnalyzerClient:
         self.http.close()
 
     def logout(self) -> bool:
+        self._emit_event("logout_started")
         # Перед logout отменяем все активные search tasks
         if self._active_tasks:
             self.cancel_all_tasks()
 
         if not self.session:
             self.close()
+            self._emit_event("logout_finished")
             return True
 
         payload = {
@@ -226,6 +228,7 @@ class FortiAnalyzerClient:
             return False
         finally:
             self.close()
+            self._emit_event("logout_finished")
 
     # ==========================
     #  Log Search

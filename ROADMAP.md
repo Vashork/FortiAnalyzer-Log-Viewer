@@ -517,9 +517,25 @@
 
 ### 5.3 Unified CLI/Web analysis service
 
+Статус: DONE — 2026-06-13
+
+Реализовано:
+- добавлен общий `analyzer.analysis_service.AnalysisService` для запуска FAZ direction/policy analyzer paths;
+- CLI `main.py` переведен на `AnalysisService` вместо собственного `process_ip_group` / ThreadPool orchestration;
+- Web `_run_faz_search()` теперь делегирует фактический FAZ invocation в `AnalysisService`, сохраняя Web-specific SSE/run_id/history/result wrapper;
+- общий service поддерживает request-scoped options: columns, aggregation, progress callback, smart_action, filter_mode;
+- `FortiAnalyzerClient.logout()` эмитит optional `logout_started` / `logout_finished`, поэтому Web progress events сохранены после переноса logout внутрь service;
+- добавлены regression tests `tests/test_analysis_service.py` для policy, direction grouping, NO DATA fallback и Web-style options forwarding.
+
+Проверка:
+- `PYTHONPATH=. pytest tests/test_analysis_service.py tests/test_log_analyzer.py tests/test_faz_client.py tests/test_run_results.py tests/test_web_history.py -q` → 32 passed;
+- `PYTHONPATH=. pytest tests/test_analysis_service.py tests/test_faz_client.py tests/test_progress_throttling.py tests/test_run_results.py tests/test_web_history.py -q` → 27 passed;
+- `PYTHONPATH=. pytest -q` → 73 passed;
+- `PYTHONPATH=. python3 -m compileall main.py client analyzer web utils tests` → OK.
+
 Что сделать:
-- выделить общий `AnalysisService`;
-- CLI и Web должны использовать один orchestration layer.
+- [x] выделить общий `AnalysisService`;
+- [x] CLI и Web должны использовать один orchestration layer.
 
 ### 5.4 Packaging and CI
 

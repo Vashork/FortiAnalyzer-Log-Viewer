@@ -11,10 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from analyzer.analysis_config import AnalysisConfig
-from analyzer.log_analyzer import analyze_logs, analyze_policyid_logs, split_time_range_safe
+from analyzer.analysis_service import AnalysisRunContext, AnalysisRunOptions, AnalysisService, AnalysisServiceConfig
+from analyzer.log_analyzer import split_time_range_safe
 from analyzer.time_range_analyzer import analyze_policyid_logs_time_split
 from client.faz_client import FortiAnalyzerClient
 from config import (
@@ -549,62 +550,60 @@ def _make_client_event_callback(emitter: SchedulerEmitter, worker: WorkerRef) ->
             )
             return
 
+        if event_type == "logout_started":
+            emitter.logout_started(worker)
+            return
+
+        if event_type == "logout_finished":
+            emitter.logout_finished(worker)
+            return
+
     return handle
 
 def _run_faz_search(worker: WorkerRef, emitter: SchedulerEmitter, cancel_check: CancelCheck, *,
                     target_ips, exclude_ips, start_time, end_time, batch_size, ports,
                     direction=None, policyid=None, columns=None, aggregation=None,
                     smart_action: Optional[str] = None, filter_mode: Optional[str] = None,
-                    analysis_config: Optional[AnalysisConfig] = None):
+                    analysis_config: Optional[AnalysisConfig] = None) -> Any:
     if analysis_config is not None:
         columns = analysis_config.columns
         aggregation = analysis_config.aggregation
         smart_action = analysis_config.smart_action
         filter_mode = analysis_config.filter_mode
-    client = FortiAnalyzerClient.from_env(
-        cancel_check=cancel_check,
-        event_callback=_make_client_event_callback(emitter, worker),
-    )
-    if not client.login():
-        return None
-
     progress = _make_progress_callback(emitter, worker)
+    service = AnalysisService(
+        client_factory=lambda: FortiAnalyzerClient.from_env(
+            cancel_check=cancel_check,
+            event_callback=_make_client_event_callback(emitter, worker),
+        ),
+        config=AnalysisServiceConfig(batch_size=batch_size),
+    )
+    context = AnalysisRunContext(
+        start_time=start_time,
+        end_time=end_time,
+        target_ips=list(target_ips),
+        exclude_ips=set(exclude_ips),
+        ports=ports,
+    )
+    options = AnalysisRunOptions(
+        columns=columns,
+        aggregation=aggregation,
+        progress=progress,
+        smart_action=smart_action,
+        filter_mode=filter_mode,
+    )
+
     try:
         if policyid is not None:
-            return analyze_policyid_logs(
-                client=client,
-                target_ips=target_ips,
-                policyid=policyid,
-                start_time=start_time,
-                end_time=end_time,
-                exclude_ips=exclude_ips,
-                batch_size=batch_size,
-                ports=ports,
-                columns=columns,
-                aggregation=aggregation,
-                progress=progress,
-                smart_action=smart_action,
-                filter_mode=filter_mode,
-            )
-        return analyze_logs(
-            client=client,
-            target_ips=target_ips,
-            direction=direction,
-            start_time=start_time,
-            end_time=end_time,
-            exclude_ips=exclude_ips,
-            batch_size=batch_size,
-            ports=ports,
-            columns=columns,
-            aggregation=aggregation,
-            progress=progress,
-            smart_action=smart_action,
-            filter_mode=filter_mode,
+            return service.run_policyid_text(context=context, policyid=policyid, options=options)
+        return service.run_direction_group(
+            ip_group=list(target_ips),
+            direction=direction or "",
+            context=context,
+            options=options,
         )
-    finally:
-        emitter.logout_started(worker)
-        client.logout()
-        emitter.logout_finished(worker)
+    except RuntimeError:
+        return None
 
 
 def _collect_request_context(request):
